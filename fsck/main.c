@@ -3,8 +3,10 @@
  * Copyright 2021 Google LLC
  * Author: Daeho Jeong <daehojeong@google.com>
  */
+#include <stdarg.h>
 #include <stdlib.h>
 #include <getopt.h>
+#include <libgen.h>
 #include <time.h>
 #include <utime.h>
 #include <unistd.h>
@@ -32,13 +34,19 @@ struct erofsfsck_cfg {
 	bool overwrite;
 	bool preserve_owner;
 	bool preserve_perms;
+    bool save_fs_config;
     char *config_dir;
-    char *symlink_file_path;
-    char *file_dir_file_path;
+    char *symlink_file;
+    char *fs_config_file;
     size_t extract_path_base_pos;
 
 };
 static struct erofsfsck_cfg fsckcfg;
+
+cJSON *fs_config = NULL;
+cJSON *symlinks = NULL ;
+cJSON *fs_config_array = NULL;
+cJSON *symlinks_array = NULL;
 
 static struct option long_options[] = {
 	{"help", no_argument, 0, 1},
@@ -56,6 +64,63 @@ static struct option long_options[] = {
 	{0, 0, 0, 0},
 };
 
+char *remove_ext (char* file_path, char extSep, char pathSep) {
+    char *retStr, *lastExt, *lastPath;
+
+
+    if (file_path == NULL) return NULL;
+    if ((retStr = malloc (strlen (file_path) + 1)) == NULL) return NULL;
+
+    strcpy (retStr, file_path);
+    lastExt = strrchr (retStr, extSep);
+    lastPath = (pathSep == 0) ? NULL : strrchr (retStr, pathSep);
+
+    if (lastExt != NULL) {
+        if (lastPath != NULL) {
+            if (lastPath < lastExt) {
+                *lastExt = '\0';
+            }
+        } else {
+            *lastExt = '\0';
+        }
+    }
+    return retStr;
+}
+
+char *slice_string(char *str, int start, int end)
+{
+    int i;
+    int size = (end - start) + 2;
+    char *output = (char *)malloc(size * sizeof(char));
+
+    for (i = 0; start <= end; start++, i++)
+    {
+        output[i] = str[start];
+    }
+
+    output[size] = '\0';
+
+    return output;
+}
+
+static int asprintf (char **ps, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int rc = vsnprintf(*ps, 0, fmt, ap);
+    va_end(ap);
+    if (rc >= 0) {
+        if ((*ps = (char *)malloc(rc + 2))) {
+            va_start(ap, fmt);
+            rc = vsnprintf(*ps, rc + 1, fmt, ap);
+            va_end(ap);
+        } else
+            rc = -1;
+    }
+
+    return rc;
+}
+
 static void print_available_decompressors(FILE *f, const char *delim)
 {
 	unsigned int i = 0;
@@ -67,6 +132,33 @@ static void print_available_decompressors(FILE *f, const char *delim)
 		fputs(s, f);
 	}
 	fputc('\n', f);
+}
+
+static int create_dir(char *path_to_dir)
+{
+    if (mkdir(path_to_dir, 0700) < 0) {
+        struct stat st;
+
+        if (errno != EEXIST) {
+            erofs_err("failed to create directory: %s (%s)",
+                      path_to_dir, strerror(errno));
+            return -errno;
+        }
+
+        if (lstat(path_to_dir, &st) ||
+            !S_ISDIR(st.st_mode)) {
+            erofs_err("path is not a directory: %s",
+                      path_to_dir);
+            return -ENOTDIR;
+        }
+
+        if (chmod(path_to_dir, 0700) < 0) {
+            erofs_err("failed to set permissions: %s (%s)",
+                      path_to_dir, strerror(errno));
+            return -errno;
+        }
+    }
+    return 0;
 }
 
 static void usage(void)
@@ -151,6 +243,28 @@ static int erofsfsck_parse_options_cfg(int argc, char **argv)
 			}
 			break;
         case 3:
+            fsckcfg.save_fs_config = true;
+            if (optarg) {
+                size_t len = strlen(optarg);
+
+                if (len == 0) {
+                    erofs_err("empty value given for --save-config-dir=X");
+                    return -EINVAL;
+                }
+
+                fsckcfg.config_dir = malloc(PATH_MAX);
+
+                if (!fsckcfg.config_dir)
+                    return -ENOMEM;
+
+                while (len > 1 && optarg[len - 1] == '/')
+                    len--;
+
+                if (asprintf(&fsckcfg.config_dir, "%s/config", optarg) < 0)
+                    return -ENOMEM;
+
+                create_dir(fsckcfg.config_dir);
+            }
             break;
 		case 4:
 			ret = blob_open_ro(optarg);
@@ -184,7 +298,7 @@ static int erofsfsck_parse_options_cfg(int argc, char **argv)
 			fsckcfg.preserve_owner = false;
 			has_opt_preserve = true;
 			break;
-		case 11:
+		case 12:
 			fsckcfg.preserve_perms = false;
 			has_opt_preserve = true;
 			break;
@@ -221,6 +335,26 @@ static int erofsfsck_parse_options_cfg(int argc, char **argv)
 	cfg.c_img_path = strdup(argv[optind++]);
 	if (!cfg.c_img_path)
 		return -ENOMEM;
+
+    if (fsckcfg.save_fs_config) {
+        char *filename;
+
+        fsckcfg.symlink_file = malloc(PATH_MAX);
+        fsckcfg.fs_config_file = malloc(PATH_MAX);
+
+        filename = remove_ext(basename(strdup(cfg.c_img_path)), '.', '/');
+
+        if (!fsckcfg.symlink_file && !fsckcfg.fs_config_file)
+            return -ENOMEM;
+
+        if (asprintf(&fsckcfg.symlink_file, "%s/%s_symlinks.json", fsckcfg.config_dir, filename) < 0)
+            return -ENOMEM;
+
+        if (asprintf(&fsckcfg.fs_config_file, "%s/%s_fs_config.json", fsckcfg.config_dir, filename) < 0)
+            return -ENOMEM;
+
+        free(filename);
+    }
 
 	if (optind < argc) {
 		erofs_err("unexpected argument: %s", argv[optind]);
@@ -523,32 +657,8 @@ static inline int erofs_extract_dir(struct erofs_inode *inode)
 	 * write/execute permission.  These are fixed up later in
 	 * erofsfsck_set_attributes().
 	 */
-	if (mkdir(fsckcfg.extract_path, 0700) < 0) {
-		struct stat st;
+    create_dir(fsckcfg.extract_path);
 
-		if (errno != EEXIST) {
-			erofs_err("failed to create directory: %s (%s)",
-				  fsckcfg.extract_path, strerror(errno));
-			return -errno;
-		}
-
-		if (lstat(fsckcfg.extract_path, &st) ||
-		    !S_ISDIR(st.st_mode)) {
-			erofs_err("path is not a directory: %s",
-				  fsckcfg.extract_path);
-			return -ENOTDIR;
-		}
-
-		/*
-		 * Try to change permissions of existing directory so
-		 * that we can write to it
-		 */
-		if (chmod(fsckcfg.extract_path, 0700) < 0) {
-			erofs_err("failed to set permissions: %s (%s)",
-				  fsckcfg.extract_path, strerror(errno));
-			return -errno;
-		}
-	}
 	return 0;
 }
 
@@ -741,11 +851,65 @@ out:
 	return ret;
 }
 
+static int write_to_config_file(char *file_path, char *data)
+{
+    FILE *fp;
+
+    if((fp = fopen(file_path, "w")) == NULL)
+    {
+        erofs_err("Error occured while opening file: %s", file_path);
+        return -EINVAL;
+    }
+
+    fprintf(fp, "%s\n", data);
+
+    fclose(fp);
+    return 0;
+}
+
+static int save_config()
+{
+    erofs_info("Save fs_config to: %s", fsckcfg.fs_config_file);
+    if (write_to_config_file(fsckcfg.fs_config_file, cJSON_Print(fs_config)) < 0) return -EINVAL;
+
+    erofs_info("Save symlinks to: %s", fsckcfg.symlink_file);
+    if (write_to_config_file(fsckcfg.symlink_file, cJSON_Print(symlinks)) < 0) return -EINVAL;
+
+    return 0;
+}
+
+static int init_json()
+{
+    fs_config = cJSON_CreateObject();
+    if (fs_config == NULL) return -errno;
+
+    symlinks = cJSON_CreateObject();
+    if (symlinks == NULL) return -errno;
+
+    fs_config_array = cJSON_CreateArray();
+    if (fs_config_array == NULL) return -errno;
+
+    symlinks_array = cJSON_CreateArray();
+    if (symlinks_array == NULL) return -errno;
+
+    cJSON_AddItemToObject(fs_config, "FSConfig", fs_config_array);
+    cJSON_AddItemToObject(symlinks, "Symlinks", symlinks_array);
+
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
 	int err;
 
 	erofs_init_configure();
+
+    err = init_json();
+    if(init_json() < 0)
+    {
+        erofs_err("JSON initialization error");
+        goto exit;
+    }
 
 	fsckcfg.physical_blocks = 0;
 	fsckcfg.logical_blocks = 0;
@@ -760,10 +924,11 @@ int main(int argc, char **argv)
 	fsckcfg.overwrite = false;
 	fsckcfg.preserve_owner = fsckcfg.superuser;
 	fsckcfg.preserve_perms = fsckcfg.superuser;
+    fsckcfg.save_fs_config = false;
     fsckcfg.config_dir = NULL;
     fsckcfg.extract_path_base_pos = 0;
-    fsckcfg.symlink_file_path = NULL;
-    fsckcfg.file_dir_file_path = NULL;
+    fsckcfg.symlink_file = NULL;
+    fsckcfg.fs_config_file = NULL;
 
 	err = erofsfsck_parse_options_cfg(argc, argv);
 	if (err) {
@@ -811,6 +976,13 @@ int main(int argc, char **argv)
 		}
 	}
 
+    if (fsckcfg.save_fs_config)
+    {
+        err = save_config();
+        if(err){
+            goto exit;
+        }
+    }
 exit_dev_close:
 	dev_close();
 exit:
