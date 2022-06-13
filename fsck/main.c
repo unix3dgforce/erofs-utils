@@ -240,6 +240,7 @@ static int erofsfsck_parse_options_cfg(int argc, char **argv)
 				if (len == 1 && fsckcfg.extract_path[0] == '/')
 					len = 0;
 				fsckcfg.extract_pos = len;
+                fsckcfg.extract_path_base_pos = len;
 			}
 			break;
         case 3:
@@ -651,6 +652,27 @@ static inline int erofs_extract_dir(struct erofs_inode *inode)
 	if (ret)
 		return ret;
 
+    if (fsckcfg.save_fs_config){
+        char *buf;
+
+        buf = slice_string(fsckcfg.extract_path, fsckcfg.extract_path_base_pos, (int)strlen(fsckcfg.extract_path));
+
+        if (buf[0] == '\0')
+        {
+            buf[0] = '/';
+        }
+
+        cJSON *dir_item = cJSON_CreateObject();
+        cJSON *dir_permission = cJSON_CreateObject();
+        cJSON_AddItemToArray(fs_config_array, dir_item);
+        cJSON_AddItemToObject(dir_item, "target", cJSON_CreateString(buf));
+        cJSON_AddItemToObject(dir_item, "directory", dir_permission);
+        cJSON_AddItemToObject(dir_permission, "uid", cJSON_CreateNumber(inode->i_uid));
+        cJSON_AddItemToObject(dir_permission, "gid", cJSON_CreateNumber(inode->i_gid));
+        sprintf(buf, "%#o", inode->i_mode & 0x0FFF);
+        cJSON_AddItemToObject(dir_permission, "permission", cJSON_CreateString(buf));
+    }
+
 	/*
 	 * Make directory with default user rwx permissions rather than
 	 * the permissions from the filesystem, as these may not have
@@ -702,6 +724,22 @@ again:
 	if (ret)
 		return ret;
 
+    if (fsckcfg.save_fs_config){
+        char *buf;
+
+        buf = slice_string(fsckcfg.extract_path, fsckcfg.extract_path_base_pos, (int)strlen(fsckcfg.extract_path));
+
+        cJSON *file_item = cJSON_CreateObject();
+        cJSON *file_permission = cJSON_CreateObject();
+        cJSON_AddItemToArray(fs_config_array, file_item);
+        cJSON_AddItemToObject(file_item, "target", cJSON_CreateString(buf));
+        cJSON_AddItemToObject(file_item, "file", file_permission);
+        cJSON_AddItemToObject(file_permission, "uid", cJSON_CreateNumber(inode->i_uid));
+        cJSON_AddItemToObject(file_permission, "gid", cJSON_CreateNumber(inode->i_gid));
+        sprintf(buf, "%#o", inode->i_mode & 0x0FFF);
+        cJSON_AddItemToObject(file_permission, "permission", cJSON_CreateString(buf));
+    }
+
 	if (close(fd))
 		return -errno;
 	return ret;
@@ -735,6 +773,14 @@ static inline int erofs_extract_symlink(struct erofs_inode *inode)
 
 	buf[inode->i_size] = '\0';
 again:
+    if (fsckcfg.save_fs_config){
+        cJSON *symlink = cJSON_CreateObject();
+        cJSON_AddItemToArray(symlinks_array, symlink);
+        cJSON_AddItemToObject(symlink, "target", cJSON_CreateString(buf));
+        cJSON_AddItemToObject(symlink, "source", cJSON_CreateString(
+                slice_string(fsckcfg.extract_path, fsckcfg.extract_path_base_pos, (int)strlen(fsckcfg.extract_path))));
+    }
+
 	if (symlink(buf, fsckcfg.extract_path) < 0) {
 		if (errno == EEXIST && fsckcfg.overwrite && tryagain) {
 			erofs_warn("try to forcely remove file %s",
@@ -978,10 +1024,7 @@ int main(int argc, char **argv)
 
     if (fsckcfg.save_fs_config)
     {
-        err = save_config();
-        if(err){
-            goto exit;
-        }
+        save_config();
     }
 exit_dev_close:
 	dev_close();
