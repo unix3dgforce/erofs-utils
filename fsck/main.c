@@ -31,21 +31,27 @@ struct erofsfsck_cfg {
 	bool overwrite;
 	bool preserve_owner;
 	bool preserve_perms;
+    char *config_dir;
+    char *symlink_file_path;
+    char *file_dir_file_path;
+    size_t extract_path_base_pos;
+
 };
 static struct erofsfsck_cfg fsckcfg;
 
 static struct option long_options[] = {
 	{"help", no_argument, 0, 1},
 	{"extract", optional_argument, 0, 2},
-	{"device", required_argument, 0, 3},
-	{"force", no_argument, 0, 4},
-	{"overwrite", no_argument, 0, 5},
-	{"preserve", no_argument, 0, 6},
-	{"preserve-owner", no_argument, 0, 7},
-	{"preserve-perms", no_argument, 0, 8},
-	{"no-preserve", no_argument, 0, 9},
-	{"no-preserve-owner", no_argument, 0, 10},
-	{"no-preserve-perms", no_argument, 0, 11},
+    {"save-config", optional_argument, 0, 3},
+	{"device", required_argument, 0, 4},
+	{"force", no_argument, 0, 5},
+	{"overwrite", no_argument, 0, 6},
+	{"preserve", no_argument, 0, 7},
+	{"preserve-owner", no_argument, 0, 8},
+	{"preserve-perms", no_argument, 0, 9},
+	{"no-preserve", no_argument, 0, 10},
+	{"no-preserve-owner", no_argument, 0, 11},
+	{"no-preserve-perms", no_argument, 0, 12},
 	{0, 0, 0, 0},
 };
 
@@ -71,6 +77,7 @@ static void usage(void)
 	      " -p                     print total compression ratio of all files\n"
 	      " --device=X             specify an extra device to be used together\n"
 	      " --extract[=X]          check if all files are well encoded, optionally extract to X\n"
+          " --save-config=X        save fs_config & symlink file to directory X\n"
 	      " --help                 display this help and exit\n"
 	      "\nExtraction options (--extract=X is required):\n"
 	      " --force                allow extracting to root\n"
@@ -142,35 +149,37 @@ static int erofsfsck_parse_options_cfg(int argc, char **argv)
 				fsckcfg.extract_pos = len;
 			}
 			break;
-		case 3:
+        case 3:
+            break;
+		case 4:
 			ret = blob_open_ro(optarg);
 			if (ret)
 				return ret;
 			++sbi.extra_devices;
 			break;
-		case 4:
+		case 5:
 			fsckcfg.force = true;
 			break;
-		case 5:
+		case 6:
 			fsckcfg.overwrite = true;
 			break;
-		case 6:
+		case 7:
 			fsckcfg.preserve_owner = fsckcfg.preserve_perms = true;
 			has_opt_preserve = true;
 			break;
-		case 7:
+		case 8:
 			fsckcfg.preserve_owner = true;
 			has_opt_preserve = true;
 			break;
-		case 8:
+		case 9:
 			fsckcfg.preserve_perms = true;
 			has_opt_preserve = true;
 			break;
-		case 9:
+		case 10:
 			fsckcfg.preserve_owner = fsckcfg.preserve_perms = false;
 			has_opt_preserve = true;
 			break;
-		case 10:
+		case 11:
 			fsckcfg.preserve_owner = false;
 			has_opt_preserve = true;
 			break;
@@ -750,6 +759,10 @@ int main(int argc, char **argv)
 	fsckcfg.overwrite = false;
 	fsckcfg.preserve_owner = fsckcfg.superuser;
 	fsckcfg.preserve_perms = fsckcfg.superuser;
+    fsckcfg.config_dir = NULL;
+    fsckcfg.extract_path_base_pos = 0;
+    fsckcfg.symlink_file_path = NULL;
+    fsckcfg.file_dir_file_path = NULL;
 
 	err = erofsfsck_parse_options_cfg(argc, argv);
 	if (err) {
