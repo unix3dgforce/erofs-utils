@@ -758,6 +758,8 @@ static inline int erofs_extract_symlink(struct erofs_inode *inode)
     bool tryagain = true;
     int ret;
     char *buf = NULL;
+    char *target = NULL;
+    char *source = NULL;
 
     erofs_dbg("extract symlink to path: %s", fsckcfg.extract_path);
 
@@ -782,10 +784,21 @@ static inline int erofs_extract_symlink(struct erofs_inode *inode)
     buf[inode->i_size] = '\0';
     again:
     if (fsckcfg.save_fs_config){
-        char *target = (char *)malloc(strlen(buf));
+        target =  malloc(inode->i_size + 1);
+        if (!target){
+            ret = -ENOMEM;
+            goto out;
+        }
+
+        size_t len = strlen(fsckcfg.extract_path) - fsckcfg.extract_path_base_pos + 1;
+        source = (char *)malloc(len * sizeof(char));
+        if (!source){
+            ret = -ENOMEM;
+            goto out;
+        }
 
         strcpy(target, buf);
-        char *source = slice_string(fsckcfg.extract_path, fsckcfg.extract_path_base_pos, (int)strlen(fsckcfg.extract_path));
+        strncpy(source, fsckcfg.extract_path + fsckcfg.extract_path_base_pos, len);
 
         cJSON *symlink = cJSON_CreateObject();
         cJSON_AddItemToArray(symlinks_array, symlink);
@@ -813,6 +826,13 @@ static inline int erofs_extract_symlink(struct erofs_inode *inode)
     out:
     if (buf)
         free(buf);
+
+    if (target)
+        free(target);
+
+    if (source)
+        free(source);
+
     return ret;
 }
 
