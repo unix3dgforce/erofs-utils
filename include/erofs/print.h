@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0+ OR Apache-2.0 */
+/* SPDX-License-Identifier: GPL-2.0+ */
 /*
  * Copyright (C) 2018-2019 HUAWEI, Inc.
  *             http://www.huawei.com/
@@ -41,39 +41,37 @@ enum {
 #define PR_FMT_FUNC_LINE(fmt)	pr_fmt(fmt), __func__, __LINE__
 #endif
 
-void erofs_msg(int dbglv, const char *fmt, ...);
-
 #define erofs_dbg(fmt, ...) do {			\
 	if (cfg.c_dbg_lvl >= EROFS_DBG) {		\
-		erofs_msg(EROFS_DBG,			\
-			  "<D> " PR_FMT_FUNC_LINE(fmt),	\
-			  ##__VA_ARGS__);		\
+		fprintf(stdout,				\
+			"<D> " PR_FMT_FUNC_LINE(fmt),	\
+			##__VA_ARGS__);			\
 	}						\
 } while (0)
 
 #define erofs_info(fmt, ...) do {			\
 	if (cfg.c_dbg_lvl >= EROFS_INFO) {		\
-		erofs_msg(EROFS_INFO,			\
-			  "<I> " PR_FMT_FUNC_LINE(fmt),	\
-			  ##__VA_ARGS__);		\
+		fprintf(stdout,				\
+			"<I> " PR_FMT_FUNC_LINE(fmt),	\
+			##__VA_ARGS__);			\
 		fflush(stdout);				\
 	}						\
 } while (0)
 
 #define erofs_warn(fmt, ...) do {			\
 	if (cfg.c_dbg_lvl >= EROFS_WARN) {		\
-		erofs_msg(EROFS_WARN,			\
-			  "<W> " PR_FMT_FUNC_LINE(fmt),	\
-			  ##__VA_ARGS__);		\
+		fprintf(stdout,				\
+			"<W> " PR_FMT_FUNC_LINE(fmt),	\
+			##__VA_ARGS__);			\
 		fflush(stdout);				\
 	}						\
 } while (0)
 
 #define erofs_err(fmt, ...) do {			\
 	if (cfg.c_dbg_lvl >= EROFS_ERR) {		\
-		erofs_msg(EROFS_ERR,			\
-			  "<E> " PR_FMT_FUNC_LINE(fmt),	\
-			  ##__VA_ARGS__);		\
+		fprintf(stderr,				\
+			"<E> " PR_FMT_FUNC_LINE(fmt),	\
+			##__VA_ARGS__);			\
 	}						\
 } while (0)
 

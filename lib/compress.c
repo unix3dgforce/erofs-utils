@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0+ OR Apache-2.0
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * Copyright (C) 2018-2019 HUAWEI, Inc.
  *             http://www.huawei.com/
@@ -70,15 +70,11 @@ static void vle_write_indexes(struct z_erofs_vle_compress_ctx *ctx,
 
 	di.di_clusterofs = cpu_to_le16(ctx->clusterofs);
 
-	/* whether the tail-end (un)compressed block or not */
+	/* whether the tail-end uncompressed block or not */
 	if (!d1) {
-		/*
-		 * A lcluster cannot have three parts with the middle one which
-		 * is well-compressed for !ztailpacking cases.
-		 */
-		DBG_BUGON(!raw && !cfg.c_ztailpacking);
-		type = raw ? Z_EROFS_VLE_CLUSTER_TYPE_PLAIN :
-			Z_EROFS_VLE_CLUSTER_TYPE_HEAD;
+		/* TODO: tail-packing inline compressed data */
+		DBG_BUGON(!raw);
+		type = Z_EROFS_VLE_CLUSTER_TYPE_PLAIN;
 		advise = cpu_to_le16(type << Z_EROFS_VLE_DI_CLUSTER_TYPE_BIT);
 
 		di.di_advise = advise;
@@ -101,22 +97,7 @@ static void vle_write_indexes(struct z_erofs_vle_compress_ctx *ctx,
 		} else if (d0) {
 			type = Z_EROFS_VLE_CLUSTER_TYPE_NONHEAD;
 
-			/*
-			 * If the |Z_EROFS_VLE_DI_D0_CBLKCNT| bit is set, parser
-			 * will interpret |delta[0]| as size of pcluster, rather
-			 * than distance to last head cluster. Normally this
-			 * isn't a problem, because uncompressed extent size are
-			 * below Z_EROFS_VLE_DI_D0_CBLKCNT * BLOCK_SIZE = 8MB.
-			 * But with large pcluster it's possible to go over this
-			 * number, resulting in corrupted compressed indices.
-			 * To solve this, we replace d0 with
-			 * Z_EROFS_VLE_DI_D0_CBLKCNT-1.
-			 */
-			if (d0 >= Z_EROFS_VLE_DI_D0_CBLKCNT)
-				di.di_u.delta[0] = cpu_to_le16(
-						Z_EROFS_VLE_DI_D0_CBLKCNT - 1);
-			else
-				di.di_u.delta[0] = cpu_to_le16(d0);
+			di.di_u.delta[0] = cpu_to_le16(d0);
 			di.di_u.delta[1] = cpu_to_le16(d1);
 		} else {
 			type = raw ? Z_EROFS_VLE_CLUSTER_TYPE_PLAIN :
@@ -181,47 +162,6 @@ static unsigned int z_erofs_get_max_pclusterblks(struct erofs_inode *inode)
 	return cfg.c_pclusterblks_def;
 }
 
-static int z_erofs_fill_inline_data(struct erofs_inode *inode, void *data,
-				    unsigned int len, bool raw)
-{
-	inode->z_advise |= Z_EROFS_ADVISE_INLINE_PCLUSTER;
-	inode->idata_size = len;
-	inode->compressed_idata = !raw;
-
-	inode->idata = malloc(inode->idata_size);
-	if (!inode->idata)
-		return -ENOMEM;
-	erofs_dbg("Recording %u %scompressed inline data",
-		  inode->idata_size, raw ? "un" : "");
-	memcpy(inode->idata, data, inode->idata_size);
-	return len;
-}
-
-static void tryrecompress_trailing(void *in, unsigned int *insize,
-				   void *out, int *compressedsize)
-{
-	static char tmp[Z_EROFS_PCLUSTER_MAX_SIZE];
-	unsigned int count;
-	int ret = *compressedsize;
-
-	/* no need to recompress */
-	if (!(ret & (EROFS_BLKSIZ - 1)))
-		return;
-
-	count = *insize;
-	ret = erofs_compress_destsize(&compresshandle,
-				      in, &count, (void *)tmp,
-				      rounddown(ret, EROFS_BLKSIZ), false);
-	if (ret <= 0 || ret + (*insize - count) >=
-			roundup(*compressedsize, EROFS_BLKSIZ))
-		return;
-
-	/* replace the original compressed data if any gain */
-	memcpy(out, tmp, ret);
-	*insize = count;
-	*compressedsize = ret;
-}
-
 static int vle_compress_one(struct erofs_inode *inode,
 			    struct z_erofs_vle_compress_ctx *ctx,
 			    bool final)
@@ -234,75 +174,41 @@ static int vle_compress_one(struct erofs_inode *inode,
 	char *const dst = dstbuf + EROFS_BLKSIZ;
 
 	while (len) {
-		unsigned int pclustersize =
+		const unsigned int pclustersize =
 			z_erofs_get_max_pclusterblks(inode) * EROFS_BLKSIZ;
-		bool may_inline = (cfg.c_ztailpacking && final);
 		bool raw;
 
 		if (len <= pclustersize) {
-			if (!final)
+			if (final) {
+				if (len <= EROFS_BLKSIZ)
+					goto nocompression;
+			} else {
 				break;
-			if (!may_inline && len <= EROFS_BLKSIZ)
-				goto nocompression;
+			}
 		}
 
 		count = min(len, cfg.c_max_decompressed_extent_bytes);
 		ret = erofs_compress_destsize(h, ctx->queue + ctx->head,
-					      &count, dst, pclustersize,
-					      !(final && len == count));
+					      &count, dst, pclustersize);
 		if (ret <= 0) {
 			if (ret != -EAGAIN) {
 				erofs_err("failed to compress %s: %s",
 					  inode->i_srcpath,
 					  erofs_strerror(ret));
 			}
-
-			if (may_inline && len < EROFS_BLKSIZ)
-				ret = z_erofs_fill_inline_data(inode,
-						ctx->queue + ctx->head,
-						len, true);
-			else
 nocompression:
-				ret = write_uncompressed_extent(ctx, &len, dst);
-
+			ret = write_uncompressed_extent(ctx, &len, dst);
 			if (ret < 0)
 				return ret;
 			count = ret;
-
-			/*
-			 * XXX: For now, we have to leave `ctx->compressedblks
-			 * = 1' since there is no way to generate compressed
-			 * indexes after the time that ztailpacking is decided.
-			 */
 			ctx->compressedblks = 1;
 			raw = true;
-		/* tailpcluster should be less than 1 block */
-		} else if (may_inline && len == count &&
-			   ret < EROFS_BLKSIZ) {
-			if (ctx->clusterofs + len <= EROFS_BLKSIZ) {
-				inode->eof_tailraw = malloc(len);
-				if (!inode->eof_tailraw)
-					return -ENOMEM;
-
-				memcpy(inode->eof_tailraw,
-				       ctx->queue + ctx->head, len);
-				inode->eof_tailrawsize = len;
-			}
-
-			ret = z_erofs_fill_inline_data(inode, dst, ret, false);
-			if (ret < 0)
-				return ret;
-			ctx->compressedblks = 1;
-			raw = false;
 		} else {
-			unsigned int tailused, padding;
+			const unsigned int tailused = ret & (EROFS_BLKSIZ - 1);
+			const unsigned int padding =
+				erofs_sb_has_lz4_0padding() && tailused ?
+					EROFS_BLKSIZ - tailused : 0;
 
-			if (may_inline && len == count)
-				tryrecompress_trailing(ctx->queue + ctx->head,
-						       &count, dst, &ret);
-
-			tailused = ret & (EROFS_BLKSIZ - 1);
-			padding = 0;
 			ctx->compressedblks = DIV_ROUND_UP(ret, EROFS_BLKSIZ);
 			DBG_BUGON(ctx->compressedblks * EROFS_BLKSIZ >= count);
 
@@ -310,8 +216,6 @@ nocompression:
 			if (!erofs_sb_has_lz4_0padding())
 				memset(dst + ret, 0,
 				       roundup(ret, EROFS_BLKSIZ) - ret);
-			else if (tailused)
-				padding = EROFS_BLKSIZ - tailused;
 
 			/* write compressed data */
 			erofs_dbg("Writing %u compressed data to %u of %u blocks",
@@ -455,8 +359,7 @@ int z_erofs_convert_to_compacted_format(struct erofs_inode *inode,
 							   inode->xattr_isize) +
 				  sizeof(struct z_erofs_map_header);
 	const unsigned int totalidx = (legacymetasize -
-			Z_EROFS_LEGACY_MAP_HEADER_SIZE) /
-				sizeof(struct z_erofs_vle_decompressed_index);
+				       Z_EROFS_LEGACY_MAP_HEADER_SIZE) / 8;
 	const unsigned int logical_clusterbits = inode->z_logical_clusterbits;
 	u8 *out, *in;
 	struct z_erofs_compressindex_vec cv[16];
@@ -546,7 +449,6 @@ static void z_erofs_write_mapheader(struct erofs_inode *inode,
 {
 	struct z_erofs_map_header h = {
 		.h_advise = cpu_to_le16(inode->z_advise),
-		.h_idata_size = cpu_to_le16(inode->idata_size),
 		.h_algorithmtype = inode->z_algorithmtype[1] << 4 |
 				   inode->z_algorithmtype[0],
 		/* lclustersize */
@@ -558,56 +460,10 @@ static void z_erofs_write_mapheader(struct erofs_inode *inode,
 	memcpy(compressmeta, &h, sizeof(struct z_erofs_map_header));
 }
 
-void z_erofs_drop_inline_pcluster(struct erofs_inode *inode)
-{
-	const unsigned int type = Z_EROFS_VLE_CLUSTER_TYPE_PLAIN;
-	struct z_erofs_map_header *h = inode->compressmeta;
-
-	h->h_advise = cpu_to_le16(le16_to_cpu(h->h_advise) &
-				  ~Z_EROFS_ADVISE_INLINE_PCLUSTER);
-	if (!inode->eof_tailraw)
-		return;
-	DBG_BUGON(inode->compressed_idata != true);
-
-	/* patch the EOF lcluster to uncompressed type first */
-	if (inode->datalayout == EROFS_INODE_FLAT_COMPRESSION_LEGACY) {
-		struct z_erofs_vle_decompressed_index *di =
-			(inode->compressmeta + inode->extent_isize) -
-			sizeof(struct z_erofs_vle_decompressed_index);
-		__le16 advise =
-			cpu_to_le16(type << Z_EROFS_VLE_DI_CLUSTER_TYPE_BIT);
-
-		di->di_advise = advise;
-	} else if (inode->datalayout == EROFS_INODE_FLAT_COMPRESSION) {
-		/* handle the last compacted 4B pack */
-		unsigned int eofs, base, pos, v, lo;
-		u8 *out;
-
-		eofs = inode->extent_isize -
-			(4 << (DIV_ROUND_UP(inode->i_size, EROFS_BLKSIZ) & 1));
-		base = round_down(eofs, 8);
-		pos = 16 /* encodebits */ * ((eofs - base) / 4);
-		out = inode->compressmeta + base;
-		lo = get_unaligned_le32(out + pos / 8) & (EROFS_BLKSIZ - 1);
-		v = (type << LOG_BLOCK_SIZE) | lo;
-		out[pos / 8] = v & 0xff;
-		out[pos / 8 + 1] = v >> 8;
-	} else {
-		DBG_BUGON(1);
-		return;
-	}
-	free(inode->idata);
-	/* replace idata with prepared uncompressed data */
-	inode->idata = inode->eof_tailraw;
-	inode->idata_size = inode->eof_tailrawsize;
-	inode->compressed_idata = false;
-	inode->eof_tailraw = NULL;
-}
-
 int erofs_write_compressed_file(struct erofs_inode *inode)
 {
 	struct erofs_buffer_head *bh;
-	static struct z_erofs_vle_compress_ctx ctx;
+	struct z_erofs_vle_compress_ctx ctx;
 	erofs_off_t remaining;
 	erofs_blk_t blkaddr, compressed_blocks;
 	unsigned int legacymetasize;
@@ -620,7 +476,7 @@ int erofs_write_compressed_file(struct erofs_inode *inode)
 	fd = open(inode->i_srcpath, O_RDONLY | O_BINARY);
 	if (fd < 0) {
 		ret = -errno;
-		goto err_free_meta;
+		goto err_free;
 	}
 
 	/* allocate main data buffer */
@@ -648,6 +504,8 @@ int erofs_write_compressed_file(struct erofs_inode *inode)
 	inode->z_algorithmtype[1] = algorithmtype[1];
 	inode->z_logical_clusterbits = LOG_BLOCK_SIZE;
 
+	z_erofs_write_mapheader(inode, compressmeta);
+
 	blkaddr = erofs_mapbh(bh->block);	/* start_blkaddr */
 	ctx.blkaddr = blkaddr;
 	ctx.metacur = compressmeta + Z_EROFS_LEGACY_MAP_HEADER_SIZE;
@@ -667,46 +525,44 @@ int erofs_write_compressed_file(struct erofs_inode *inode)
 		remaining -= readcount;
 		ctx.tail += readcount;
 
-		ret = vle_compress_one(inode, &ctx, !remaining);
+		/* do one compress round */
+		ret = vle_compress_one(inode, &ctx, false);
 		if (ret)
-			goto err_free_idata;
+			goto err_bdrop;
 	}
-	DBG_BUGON(ctx.head != ctx.tail);
+
+	/* do the final round */
+	ret = vle_compress_one(inode, &ctx, true);
+	if (ret)
+		goto err_bdrop;
 
 	/* fall back to no compression mode */
 	compressed_blocks = ctx.blkaddr - blkaddr;
-	DBG_BUGON(compressed_blocks < !!inode->idata_size);
-	compressed_blocks -= !!inode->idata_size;
+	if (compressed_blocks >= BLK_ROUND_UP(inode->i_size)) {
+		ret = -ENOSPC;
+		goto err_bdrop;
+	}
 
 	vle_write_indexes_final(&ctx);
-	legacymetasize = ctx.metacur - compressmeta;
-	/* estimate if data compression saves space or not */
-	if (compressed_blocks * EROFS_BLKSIZ + inode->idata_size +
-	    legacymetasize >= inode->i_size) {
-		ret = -ENOSPC;
-		goto err_free_idata;
-	}
-	z_erofs_write_mapheader(inode, compressmeta);
 
 	close(fd);
-	if (compressed_blocks) {
-		ret = erofs_bh_balloon(bh, blknr_to_addr(compressed_blocks));
-		DBG_BUGON(ret != EROFS_BLKSIZ);
-	} else {
-		DBG_BUGON(!inode->idata_size);
-	}
+	DBG_BUGON(!compressed_blocks);
+	ret = erofs_bh_balloon(bh, blknr_to_addr(compressed_blocks));
+	DBG_BUGON(ret != EROFS_BLKSIZ);
 
 	erofs_info("compressed %s (%llu bytes) into %u blocks",
 		   inode->i_srcpath, (unsigned long long)inode->i_size,
 		   compressed_blocks);
 
-	if (inode->idata_size)
-		inode->bh_data = bh;
-	else
-		erofs_bdrop(bh, false);
-
+	/*
+	 * TODO: need to move erofs_bdrop to erofs_write_tail_end
+	 *       when both mkfs & kernel support compression inline.
+	 */
+	erofs_bdrop(bh, false);
+	inode->idata_size = 0;
 	inode->u.i_blocks = compressed_blocks;
 
+	legacymetasize = ctx.metacur - compressmeta;
 	if (inode->datalayout == EROFS_INODE_FLAT_COMPRESSION_LEGACY) {
 		inode->extent_isize = legacymetasize;
 	} else {
@@ -719,16 +575,11 @@ int erofs_write_compressed_file(struct erofs_inode *inode)
 	erofs_droid_blocklist_write(inode, blkaddr, compressed_blocks);
 	return 0;
 
-err_free_idata:
-	if (inode->idata) {
-		free(inode->idata);
-		inode->idata = NULL;
-	}
 err_bdrop:
 	erofs_bdrop(bh, true);	/* revoke buffer */
 err_close:
 	close(fd);
-err_free_meta:
+err_free:
 	free(compressmeta);
 	return ret;
 }
@@ -840,6 +691,7 @@ int z_erofs_compress_init(struct erofs_buffer_head *sb_bh)
 			return -EINVAL;
 		}
 		erofs_sb_set_big_pcluster();
+		erofs_warn("EXPERIMENTAL big pcluster feature in use. Use at your own risk!");
 	}
 
 	if (ret != Z_EROFS_COMPRESSION_LZ4)

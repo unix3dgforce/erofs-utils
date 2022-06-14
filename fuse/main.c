@@ -61,6 +61,7 @@ int erofsfuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 #else
 	return erofs_iterate_dir(&ctx.ctx, true);
 #endif
+
 }
 
 static void *erofsfuse_init(struct fuse_conn_info *info)
@@ -257,7 +258,7 @@ int main(int argc, char *argv[])
 	struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
 
 	erofs_init_configure();
-	printf("%s %s\n", basename(argv[0]), cfg.c_version);
+	fprintf(stderr, "%s %s\n", basename(argv[0]), cfg.c_version);
 
 #if defined(HAVE_EXECINFO_H) && defined(HAVE_BACKTRACE)
 	if (signal(SIGSEGV, signal_handle_sigsegv) == SIG_ERR) {
