@@ -16,6 +16,7 @@
 #include "erofs/compress.h"
 #include "erofs/decompress.h"
 #include "erofs/dir.h"
+#include "erofs/xattr.h"
 #include "cJSON.h"
 
 static int erofsfsck_check_inode(erofs_nid_t pnid, erofs_nid_t nid);
@@ -439,6 +440,8 @@ static int erofs_verify_xattr(struct erofs_inode *inode)
     int i, remaining = inode->xattr_isize, ret = 0;
     char buf[EROFS_BLKSIZ];
 
+    init_list_head(&inode->i_xattrs);
+
     if (inode->xattr_isize == xattr_hdr_size) {
         erofs_err("xattr_isize %d of nid %llu is not supported yet",
                   inode->xattr_isize, inode->nid | 0ULL);
@@ -492,6 +495,12 @@ static int erofs_verify_xattr(struct erofs_inode *inode)
         }
 
         entry = (struct erofs_xattr_entry *)buf;
+        //TODO: необходимо сгенерировать  i_xattrs тип struct list_head
+        char *name = malloc(entry->e_name_len + 1);
+        dev_read(0, name, addr + xattr_entry_size, entry->e_name_len);
+        name[entry->e_name_len] = '\0';
+        erofs_err("nid: %llu e_name_len: %d e_name: %s addr: %llu", inode->nid | 0ULL, entry->e_name_len, name, addr | 0ULL);
+
         entry_sz = erofs_xattr_entry_size(entry);
         if (remaining < entry_sz) {
             erofs_err("xattr on-disk corruption: xattr entry beyond xattr_isize @ nid %llu",
@@ -729,11 +738,13 @@ static inline int erofs_extract_file(struct erofs_inode *inode)
         return ret;
 
     if (fsckcfg.save_fs_config){
+
         char *buf = (char *)malloc(6 * sizeof(char));
 
         size_t len = strlen(fsckcfg.extract_path) - fsckcfg.extract_path_base_pos + 1;
         char *truncated_path = (char *)malloc(len * sizeof(char));
         strncpy(truncated_path, fsckcfg.extract_path + fsckcfg.extract_path_base_pos, len);
+
 
         cJSON *file_item = cJSON_CreateObject();
         cJSON *file_permission = cJSON_CreateObject();
