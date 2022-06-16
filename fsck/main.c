@@ -17,7 +17,14 @@
 #include "erofs/decompress.h"
 #include "erofs/dir.h"
 #include "erofs/xattr.h"
+#include "erofs/hashtable.h"
 #include "cJSON.h"
+
+#define EA_HASHTABLE_BITS 16
+
+static DECLARE_HASHTABLE(ea_hashtable, EA_HASHTABLE_BITS);
+static LIST_HEAD(shared_xattrs_list);
+static unsigned int shared_xattrs_count, shared_xattrs_size;
 
 static int erofsfsck_check_inode(erofs_nid_t pnid, erofs_nid_t nid);
 
@@ -42,6 +49,20 @@ struct erofsfsck_cfg {
     size_t extract_path_base_pos;
 
 };
+
+struct xattr_item {
+    const char *kvbuf;
+    unsigned int hash[2], len[2], count;
+    int shared_xattr_id;
+    u8 prefix;
+    struct hlist_node node;
+};
+
+struct inode_xattr_node {
+    struct list_head list;
+    struct xattr_item *item;
+};
+
 static struct erofsfsck_cfg fsckcfg;
 
 cJSON *fs_config = NULL;
@@ -120,6 +141,106 @@ static int asprintf (char **ps, const char *fmt, ...)
     }
 
     return rc;
+}
+
+static unsigned int BKDRHash(char *str, unsigned int len)
+{
+    const unsigned int seed = 131313;
+    unsigned int hash = 0;
+
+    while (len) {
+        hash = hash * seed + (*str++);
+        --len;
+    }
+    return hash;
+}
+
+static unsigned int xattr_item_hash(u8 prefix, char *buf,
+                                    unsigned int len[2], unsigned int hash[2])
+{
+    hash[0] = BKDRHash(buf, len[0]);	/* key */
+    hash[1] = BKDRHash(buf + len[0], len[1]);	/* value */
+
+    return prefix ^ hash[0] ^ hash[1];
+}
+
+static int inode_xattr_add(struct list_head *hlist, struct xattr_item *item)
+{
+    struct inode_xattr_node *node = malloc(sizeof(*node));
+
+    if (!node)
+        return -ENOMEM;
+    init_list_head(&node->list);
+    node->item = item;
+    list_add(&node->list, hlist);
+    return 0;
+}
+
+static int shared_xattr_add(struct xattr_item *item)
+{
+    struct inode_xattr_node *node = malloc(sizeof(*node));
+
+    if (!node)
+        return -ENOMEM;
+
+    init_list_head(&node->list);
+    node->item = item;
+    list_add(&node->list, &shared_xattrs_list);
+
+    shared_xattrs_size += sizeof(struct erofs_xattr_entry);
+    shared_xattrs_size = EROFS_XATTR_ALIGN(shared_xattrs_size +
+                                           item->len[0] + item->len[1]);
+    return ++shared_xattrs_count;
+}
+
+static int erofs_xattr_add(struct list_head *ixattrs, struct xattr_item *item)
+{
+    if (ixattrs)
+        return inode_xattr_add(ixattrs, item);
+
+    if (item->count == cfg.c_inline_xattr_tolerance + 1) {
+        int ret = shared_xattr_add(item);
+
+        if (ret < 0)
+            return ret;
+    }
+    return 0;
+}
+
+static struct xattr_item *get_xattritem(u8 prefix, char *kvbuf, unsigned int len[2])
+{
+    struct xattr_item *item;
+    unsigned int hash[2], hkey;
+
+    hkey = xattr_item_hash(prefix, kvbuf, len, hash);
+
+    hash_for_each_possible(ea_hashtable, item, node, hkey) {
+        if (prefix == item->prefix &&
+            item->len[0] == len[0] && item->len[1] == len[1] &&
+            item->hash[0] == hash[0] && item->hash[1] == hash[1] &&
+            !memcmp(kvbuf, item->kvbuf, len[0] + len[1])) {
+            free(kvbuf);
+            ++item->count;
+            return item;
+        }
+    }
+
+    item = malloc(sizeof(*item));
+    if (!item) {
+        free(kvbuf);
+        return ERR_PTR(-ENOMEM);
+    }
+    INIT_HLIST_NODE(&item->node);
+    item->count = 1;
+    item->kvbuf = kvbuf;
+    item->len[0] = len[0];
+    item->len[1] = len[1];
+    item->hash[0] = hash[0];
+    item->hash[1] = hash[1];
+    item->shared_xattr_id = -1;
+    item->prefix = prefix;
+    hash_add(ea_hashtable, &item->node, hkey);
+    return item;
 }
 
 static void print_available_decompressors(FILE *f, const char *delim)
@@ -439,6 +560,9 @@ static int erofs_verify_xattr(struct erofs_inode *inode)
     struct erofs_xattr_entry *entry;
     int i, remaining = inode->xattr_isize, ret = 0;
     char buf[EROFS_BLKSIZ];
+    char *kvbuf;
+    struct xattr_item *item;
+    unsigned int len[2];
 
     init_list_head(&inode->i_xattrs);
 
@@ -497,9 +621,43 @@ static int erofs_verify_xattr(struct erofs_inode *inode)
         entry = (struct erofs_xattr_entry *)buf;
         //TODO: необходимо сгенерировать  i_xattrs тип struct list_head
         char *name = malloc(entry->e_name_len + 1);
-        dev_read(0, name, addr + xattr_entry_size, entry->e_name_len);
+
+        ret = dev_read(0, name, addr + xattr_entry_size, entry->e_name_len);
+        if (ret) {
+            erofs_err("failed to read xattr entry @ nid %llu: %d",
+                      inode->nid | 0ULL, ret);
+            goto out;
+        }
+
         name[entry->e_name_len] = '\0';
-        erofs_err("nid: %llu e_name_len: %d e_name: %s addr: %llu", inode->nid | 0ULL, entry->e_name_len, name, addr | 0ULL);
+
+        if (strcmp(name, "selinux")==0){
+            len[0] = entry->e_name_len;
+            len[1] = entry->e_value_size;
+            kvbuf = malloc(entry->e_name_len + entry->e_value_size + 1);
+            if (!kvbuf) {
+                goto out;
+            }
+
+            kvbuf[entry->e_name_len + entry->e_value_size] = '\0';
+
+            ret = dev_read(0, kvbuf, addr + xattr_entry_size, entry->e_name_len + entry->e_value_size);
+            if (ret) {
+                erofs_err("failed to read xattr entry @ nid %llu: %d",
+                          inode->nid | 0ULL, ret);
+                goto out;
+            }
+
+            item = get_xattritem(EROFS_XATTR_INDEX_SECURITY, kvbuf, len);
+            if (IS_ERR(item)){
+                goto out;
+            }
+
+            ret = erofs_xattr_add(&inode->i_xattrs, item);
+            if(ret){
+                goto out;
+            }
+        }
 
         entry_sz = erofs_xattr_entry_size(entry);
         if (remaining < entry_sz) {
@@ -701,8 +859,16 @@ static inline int erofs_extract_file(struct erofs_inode *inode)
 {
     bool tryagain = true;
     int ret, fd;
+    struct inode_xattr_node *node;
+    struct list_head *ixattrs = &inode->i_xattrs;
 
     erofs_dbg("extract file to path: %s", fsckcfg.extract_path);
+
+    list_for_each_entry(node, ixattrs, list) {
+        const struct xattr_item *item = node->item;
+
+        erofs_err("count:%d, name_len:%d value_len: %d value:%s", item->count, item->len[0], item->len[1], item->kvbuf);
+    }
 
     again:
     fd = open(fsckcfg.extract_path,
