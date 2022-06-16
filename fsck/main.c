@@ -1076,8 +1076,6 @@ static inline int erofs_extract_file(struct erofs_inode *inode)
         strncpy(truncated_path, fsckcfg.extract_path + fsckcfg.extract_path_base_pos, len);
 
         capabilities = erofs_get_capabilities(ixattrs);
-        if (capabilities > 0)
-            erofs_err("0x%lx", capabilities);
 
         cJSON *file_item = cJSON_CreateObject();
         cJSON *file_permission = cJSON_CreateObject();
@@ -1087,7 +1085,13 @@ static inline int erofs_extract_file(struct erofs_inode *inode)
         cJSON_AddItemToObject(file_permission, "uid", cJSON_CreateNumber(inode->i_uid));
         cJSON_AddItemToObject(file_permission, "gid", cJSON_CreateNumber(inode->i_gid));
         sprintf(buf, "%#o", inode->i_mode & 0x0FFF);
-        cJSON_AddItemToObject(file_permission, "permission", cJSON_CreateString(buf));
+        cJSON_AddItemToObject(file_permission, "mode", cJSON_CreateString(buf));
+        if (capabilities > 0)
+        {
+            char *caps = NULL;
+            asprintf(&caps, "0x%lx", capabilities);
+            cJSON_AddItemToObject(file_permission, "capabilities", cJSON_CreateString(caps));
+        }
 
         free(truncated_path);
     }
