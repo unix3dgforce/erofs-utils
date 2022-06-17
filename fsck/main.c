@@ -1072,6 +1072,7 @@ static inline int erofs_extract_file(struct erofs_inode *inode)
 
         cJSON *file_item = cJSON_CreateObject();
         cJSON *file_permission = cJSON_CreateObject();
+        cJSON *capabilities_item = cJSON_CreateObject();
         cJSON_AddItemToArray(fs_config_array, file_item);
         cJSON_AddItemToObject(file_item, "target", cJSON_CreateString(truncated_path));
         cJSON_AddItemToObject(file_item, "file", file_permission);
@@ -1083,7 +1084,12 @@ static inline int erofs_extract_file(struct erofs_inode *inode)
         {
             char *caps = NULL;
             asprintf(&caps, "0x%lx", capabilities);
-            cJSON_AddItemToObject(file_permission, "capabilities", cJSON_CreateString(caps));
+            cJSON_AddItemToArray(capabilities_array, capabilities_item);
+            cJSON_AddItemToObject(capabilities_item, "path", cJSON_CreateString(truncated_path));
+            cJSON_AddItemToObject(capabilities_item, "uid", cJSON_CreateNumber(inode->i_uid));
+            cJSON_AddItemToObject(capabilities_item, "gid", cJSON_CreateNumber(inode->i_gid));
+            cJSON_AddItemToObject(file_permission, "mode", cJSON_CreateString(buf));
+            cJSON_AddItemToObject(capabilities_item, "capabilities", cJSON_CreateString(caps));
         }
 
         free(truncated_path);
