@@ -2,7 +2,10 @@
 /*
  * Copyright 2021 Google LLC
  * Author: Daeho Jeong <daehojeong@google.com>
+ * Contributor: Sergey Korkin <unix3dgforce@gmail.com>
  */
+
+#define _GNU_SOURCE
 #include <stdarg.h>
 #include <stdlib.h>
 #include <getopt.h>
@@ -21,12 +24,37 @@
 #include "cJSON.h"
 
 #define EA_HASHTABLE_BITS 16
+#define VFS_CAP_FLAGS_EFFECTIVE 0x000001
+#define VFS_CAP_REVISION_2 0x02000000
+#define VFS_CAP_U32_1 1
+#define VFS_CAP_REVISION_2 0x02000000
+#define VFS_CAP_U32_2 2
+#define VFS_CAP_U32 VFS_CAP_U32_2
 
 static DECLARE_HASHTABLE(ea_hashtable, EA_HASHTABLE_BITS);
 static LIST_HEAD(shared_xattrs_list);
+
+cJSON *root = NULL;
+cJSON *fs_config_array = NULL;
+cJSON *symlinks_array = NULL;
+cJSON *capabilities_array = NULL;
+
 static unsigned int shared_xattrs_count, shared_xattrs_size;
 
 static int erofsfsck_check_inode(erofs_nid_t pnid, erofs_nid_t nid);
+
+struct xattr_item {
+    const char *kvbuf;
+    unsigned int hash[2], len[2], count;
+    int shared_xattr_id;
+    u8 prefix;
+    struct hlist_node node;
+};
+
+struct inode_xattr_node {
+    struct list_head list;
+    struct xattr_item *item;
+};
 
 struct erofsfsck_cfg {
     u64 physical_blocks;
@@ -44,31 +72,11 @@ struct erofsfsck_cfg {
     bool preserve_perms;
     bool save_fs_config;
     char *config_dir;
-    char *symlink_file;
-    char *fs_config_file;
+    char *config_file;
     size_t extract_path_base_pos;
-
-};
-
-struct xattr_item {
-    const char *kvbuf;
-    unsigned int hash[2], len[2], count;
-    int shared_xattr_id;
-    u8 prefix;
-    struct hlist_node node;
-};
-
-struct inode_xattr_node {
-    struct list_head list;
-    struct xattr_item *item;
 };
 
 static struct erofsfsck_cfg fsckcfg;
-
-cJSON *fs_config = NULL;
-cJSON *symlinks = NULL ;
-cJSON *fs_config_array = NULL;
-cJSON *symlinks_array = NULL;
 
 static struct option long_options[] = {
         {"help", no_argument, 0, 1},
@@ -86,61 +94,146 @@ static struct option long_options[] = {
         {0, 0, 0, 0},
 };
 
-char *remove_ext (char* file_path, char extSep, char pathSep) {
-    char *retStr, *lastExt, *lastPath;
+struct vfs_cap_data {
+    __le32 magic_etc;
+    struct {
+        __le32 permitted;
+        __le32 inheritable;
+    } data[VFS_CAP_U32];
+};
+
+static inline char *__remove_extensions (char* file_path, char ext_sep, char path_sep) {
+    char *result, *last_ext, *last_path;
 
 
     if (file_path == NULL) return NULL;
-    if ((retStr = malloc (strlen (file_path) + 1)) == NULL) return NULL;
+    if ((result = malloc (strlen (file_path) + 1)) == NULL) return NULL;
 
-    strcpy (retStr, file_path);
-    lastExt = strrchr (retStr, extSep);
-    lastPath = (pathSep == 0) ? NULL : strrchr (retStr, pathSep);
+    strcpy (result, file_path);
+    last_ext = strrchr (result, ext_sep);
+    last_path = (path_sep == 0) ? NULL : strrchr (result, path_sep);
 
-    if (lastExt != NULL) {
-        if (lastPath != NULL) {
-            if (lastPath < lastExt) {
-                *lastExt = '\0';
+    if (last_ext != NULL) {
+        if (last_path != NULL) {
+            if (last_path < last_ext) {
+                *last_ext = '\0';
             }
         } else {
-            *lastExt = '\0';
+            *last_ext = '\0';
         }
     }
-    return retStr;
+    return result;
 }
 
-char *slice_string(char *str, int start, int end)
+static inline int __create_dir(char *path_to_dir)
 {
-    int i;
-    int size = (end - start) + 2;
-    char *output = (char *)malloc(size * sizeof(char));
+    if (mkdir(path_to_dir, 0700) < 0) {
+        struct stat st;
 
-    for (i = 0; start <= end; start++, i++)
+        if (errno != EEXIST) {
+            erofs_err("failed to create directory: %s (%s)",
+                      path_to_dir, strerror(errno));
+            return -errno;
+        }
+
+        if (lstat(path_to_dir, &st) ||
+            !S_ISDIR(st.st_mode)) {
+            erofs_err("path is not a directory: %s",
+                      path_to_dir);
+            return -ENOTDIR;
+        }
+
+        if (chmod(path_to_dir, 0700) < 0) {
+            erofs_err("failed to set permissions: %s (%s)",
+                      path_to_dir, strerror(errno));
+            return -errno;
+        }
+    }
+    return 0;
+}
+
+static inline int __write_to_config_file(char *file_path, char *data)
+{
+    FILE *fp;
+
+    if((fp = fopen(file_path, "w")) == NULL)
     {
-        output[i] = str[start];
+        erofs_err("Error occured while opening file: %s", file_path);
+        return -EIO;
     }
 
-    output[size] = '\0';
+    fprintf(fp, "%s\n", data);
 
-    return output;
+    fclose(fp);
+    return 0;
 }
 
-static int asprintf (char **ps, const char *fmt, ...)
+static inline int __save_config()
 {
-    va_list ap;
-    va_start(ap, fmt);
-    int rc = vsnprintf(*ps, 0, fmt, ap);
-    va_end(ap);
-    if (rc >= 0) {
-        if ((*ps = (char *)malloc(rc + 2))) {
-            va_start(ap, fmt);
-            rc = vsnprintf(*ps, rc + 1, fmt, ap);
-            va_end(ap);
-        } else
-            rc = -1;
-    }
+    erofs_info("Save config to: %s", fsckcfg.config_file);
+    if (__write_to_config_file(fsckcfg.config_file, cJSON_Print(root)) < 0) return -EIO;
 
-    return rc;
+    return 0;
+}
+
+static inline int __init_json()
+{
+    root = cJSON_CreateObject();
+    if (root == NULL) return -errno;
+
+    fs_config_array = cJSON_CreateArray();
+    if (fs_config_array == NULL) return -errno;
+
+    symlinks_array = cJSON_CreateArray();
+    if (symlinks_array == NULL) return -errno;
+
+    capabilities_array = cJSON_CreateArray();
+    if (capabilities_array == NULL) return -errno;
+
+    cJSON_AddItemToObject(root, "Capabilities", capabilities_array);
+    cJSON_AddItemToObject(root, "FSConfig", fs_config_array);
+    cJSON_AddItemToObject(root, "Symlinks", symlinks_array);
+
+    return 0;
+}
+
+static void __print_available_decompressors(FILE *f, const char *delim)
+{
+    unsigned int i = 0;
+    const char *s;
+
+    while ((s = z_erofs_list_available_compressors(i)) != NULL) {
+        if (i++)
+            fputs(delim, f);
+        fputs(s, f);
+    }
+    fputc('\n', f);
+}
+
+static void __usage(void)
+{
+    fputs("usage: [options] IMAGE\n\n"
+          "Check erofs filesystem compatibility and integrity of IMAGE, and [options] are:\n"
+          " -V                     print the version number of fsck.erofs and exit\n"
+          " -d#                    set output message level to # (maximum 9)\n"
+          " -p                     print total compression ratio of all files\n"
+          " --device=X             specify an extra device to be used together\n"
+          " --extract[=X]          check if all files are well encoded, optionally extract to X\n"
+          " --save-config=X        save fs_config & symlink file to directory X\n"
+          " --help                 display this help and exit\n"
+          "\nExtraction options (--extract=X is required):\n"
+          " --force                allow extracting to root\n"
+          " --overwrite            overwrite files that already exist\n"
+          " --preserve             extract with the same ownership and permissions as on the filesystem\n"
+          "                        (default for superuser)\n"
+          " --preserve-owner       extract with the same ownership as on the filesystem\n"
+          " --preserve-perms       extract with the same permissions as on the filesystem\n"
+          " --no-preserve          extract as yourself and apply user's umask on permissions\n"
+          "                        (default for ordinary users)\n"
+          " --no-preserve-owner    extract as yourself\n"
+          " --no-preserve-perms    apply user's umask when extracting permissions\n"
+          "\nSupported algorithms are: ", stderr);
+    __print_available_decompressors(stderr, ", ");
 }
 
 static unsigned int BKDRHash(char *str, unsigned int len)
@@ -155,8 +248,7 @@ static unsigned int BKDRHash(char *str, unsigned int len)
     return hash;
 }
 
-static unsigned int xattr_item_hash(u8 prefix, char *buf,
-                                    unsigned int len[2], unsigned int hash[2])
+static unsigned int xattr_item_hash(u8 prefix, char *buf, unsigned int len[2], unsigned int hash[2])
 {
     hash[0] = BKDRHash(buf, len[0]);	/* key */
     hash[1] = BKDRHash(buf + len[0], len[1]);	/* value */
@@ -191,20 +283,6 @@ static int shared_xattr_add(struct xattr_item *item)
     shared_xattrs_size = EROFS_XATTR_ALIGN(shared_xattrs_size +
                                            item->len[0] + item->len[1]);
     return ++shared_xattrs_count;
-}
-
-static int erofs_xattr_add(struct list_head *ixattrs, struct xattr_item *item)
-{
-    if (ixattrs)
-        return inode_xattr_add(ixattrs, item);
-
-    if (item->count == cfg.c_inline_xattr_tolerance + 1) {
-        int ret = shared_xattr_add(item);
-
-        if (ret < 0)
-            return ret;
-    }
-    return 0;
 }
 
 static struct xattr_item *get_xattritem(u8 prefix, char *kvbuf, unsigned int len[2])
@@ -243,72 +321,6 @@ static struct xattr_item *get_xattritem(u8 prefix, char *kvbuf, unsigned int len
     return item;
 }
 
-static void print_available_decompressors(FILE *f, const char *delim)
-{
-    unsigned int i = 0;
-    const char *s;
-
-    while ((s = z_erofs_list_available_compressors(i)) != NULL) {
-        if (i++)
-            fputs(delim, f);
-        fputs(s, f);
-    }
-    fputc('\n', f);
-}
-
-static int create_dir(char *path_to_dir)
-{
-    if (mkdir(path_to_dir, 0700) < 0) {
-        struct stat st;
-
-        if (errno != EEXIST) {
-            erofs_err("failed to create directory: %s (%s)",
-                      path_to_dir, strerror(errno));
-            return -errno;
-        }
-
-        if (lstat(path_to_dir, &st) ||
-            !S_ISDIR(st.st_mode)) {
-            erofs_err("path is not a directory: %s",
-                      path_to_dir);
-            return -ENOTDIR;
-        }
-
-        if (chmod(path_to_dir, 0700) < 0) {
-            erofs_err("failed to set permissions: %s (%s)",
-                      path_to_dir, strerror(errno));
-            return -errno;
-        }
-    }
-    return 0;
-}
-
-static void usage(void)
-{
-    fputs("usage: [options] IMAGE\n\n"
-          "Check erofs filesystem compatibility and integrity of IMAGE, and [options] are:\n"
-          " -V                     print the version number of fsck.erofs and exit\n"
-          " -d#                    set output message level to # (maximum 9)\n"
-          " -p                     print total compression ratio of all files\n"
-          " --device=X             specify an extra device to be used together\n"
-          " --extract[=X]          check if all files are well encoded, optionally extract to X\n"
-          " --save-config=X        save fs_config & symlink file to directory X\n"
-          " --help                 display this help and exit\n"
-          "\nExtraction options (--extract=X is required):\n"
-          " --force                allow extracting to root\n"
-          " --overwrite            overwrite files that already exist\n"
-          " --preserve             extract with the same ownership and permissions as on the filesystem\n"
-          "                        (default for superuser)\n"
-          " --preserve-owner       extract with the same ownership as on the filesystem\n"
-          " --preserve-perms       extract with the same permissions as on the filesystem\n"
-          " --no-preserve          extract as yourself and apply user's umask on permissions\n"
-          "                        (default for ordinary users)\n"
-          " --no-preserve-owner    extract as yourself\n"
-          " --no-preserve-perms    apply user's umask when extracting permissions\n"
-          "\nSupported algorithms are: ", stderr);
-    print_available_decompressors(stderr, ", ");
-}
-
 static void erofsfsck_print_version(void)
 {
     fprintf(stderr, "fsck.erofs %s\n", cfg.c_version);
@@ -337,7 +349,7 @@ static int erofsfsck_parse_options_cfg(int argc, char **argv)
                 fsckcfg.print_comp_ratio = true;
                 break;
             case 1:
-                usage();
+                __usage();
                 exit(0);
             case 2:
                 fsckcfg.check_decomp = true;
@@ -386,7 +398,9 @@ static int erofsfsck_parse_options_cfg(int argc, char **argv)
                     if (asprintf(&fsckcfg.config_dir, "%s/config", optarg) < 0)
                         return -ENOMEM;
 
-                    create_dir(fsckcfg.config_dir);
+                    ret = __create_dir(fsckcfg.config_dir);
+                    if (ret)
+                        return -errno;
                 }
                 break;
             case 4:
@@ -460,20 +474,17 @@ static int erofsfsck_parse_options_cfg(int argc, char **argv)
         return -ENOMEM;
 
     if (fsckcfg.save_fs_config) {
+        //TODO Подвергнуть рефакторингу
         char *filename;
 
-        fsckcfg.symlink_file = malloc(PATH_MAX);
-        fsckcfg.fs_config_file = malloc(PATH_MAX);
+        fsckcfg.config_file = malloc(PATH_MAX);
 
-        filename = remove_ext(basename(strdup(cfg.c_img_path)), '.', '/');
+        filename = __remove_extensions(basename(strdup(cfg.c_img_path)), '.', '/');
 
-        if (!fsckcfg.symlink_file && !fsckcfg.fs_config_file)
+        if (!fsckcfg.config_file)
             return -ENOMEM;
 
-        if (asprintf(&fsckcfg.symlink_file, "%s/%s_symlinks.json", fsckcfg.config_dir, filename) < 0)
-            return -ENOMEM;
-
-        if (asprintf(&fsckcfg.fs_config_file, "%s/%s_fs_config.json", fsckcfg.config_dir, filename) < 0)
+        if (asprintf(&fsckcfg.config_file, "%s/%s_config.json", fsckcfg.config_dir, filename) < 0)
             return -ENOMEM;
 
         free(filename);
@@ -523,6 +534,34 @@ static void erofsfsck_set_attributes(struct erofs_inode *inode, char *path)
     }
 }
 
+static int erofsfsck_dirent_iter(struct erofs_dir_context *ctx)
+{
+    int ret;
+    size_t prev_pos = fsckcfg.extract_pos;
+
+    if (ctx->dot_dotdot)
+        return 0;
+
+    if (fsckcfg.extract_path) {
+        size_t curr_pos = prev_pos;
+
+        fsckcfg.extract_path[curr_pos++] = '/';
+        strncpy(fsckcfg.extract_path + curr_pos, ctx->dname,
+                ctx->de_namelen);
+        curr_pos += ctx->de_namelen;
+        fsckcfg.extract_path[curr_pos] = '\0';
+        fsckcfg.extract_pos = curr_pos;
+    }
+
+    ret = erofsfsck_check_inode(ctx->dir->nid, ctx->de_nid);
+
+    if (fsckcfg.extract_path) {
+        fsckcfg.extract_path[prev_pos] = '\0';
+        fsckcfg.extract_pos = prev_pos;
+    }
+    return ret;
+}
+
 static int erofs_check_sb_chksum(void)
 {
     int ret;
@@ -550,6 +589,96 @@ static int erofs_check_sb_chksum(void)
     return 0;
 }
 
+static int erofs_xattr_add(struct list_head *ixattrs, struct xattr_item *item)
+{
+    if (ixattrs)
+        return inode_xattr_add(ixattrs, item);
+
+    if (item->count == cfg.c_inline_xattr_tolerance + 1) {
+        int ret = shared_xattr_add(item);
+
+        if (ret < 0)
+            return ret;
+    }
+    return 0;
+}
+
+static struct xattr_item *erofs_get_selabel_xattr(struct erofs_xattr_entry *entry, erofs_off_t addr)
+{
+    int ret = 0;
+    struct xattr_item *item;
+    unsigned int len[2];
+    char *kvbuf;
+
+    len[0] = entry->e_name_len;
+    len[1] = entry->e_value_size;
+
+    kvbuf = malloc(len[0] + len[1] + 1);
+    if (!kvbuf) {
+        free(kvbuf);
+        return ERR_PTR(-ENOMEM);
+    }
+
+    ret = dev_read(0, kvbuf, addr, len[0] + len[1]);
+    if (ret){
+        free(kvbuf);
+        return ERR_PTR(-errno);
+    }
+
+    kvbuf[len[0] + len[1]] = '\0';
+
+    item = get_xattritem(EROFS_XATTR_INDEX_SECURITY, kvbuf, len);
+    if (IS_ERR(item)){
+        free(kvbuf);
+        return ERR_PTR(-errno);
+    }
+
+    return item;
+}
+
+static struct xattr_item *erofs_get_caps_xattr(struct erofs_xattr_entry *entry, erofs_off_t addr)
+{
+    int ret = 0;
+    struct xattr_item *item;
+    unsigned int len[2];
+//    struct vfs_cap_data *caps;
+    char *capbuf;
+    char *kvbuf;
+
+    len[0] = entry->e_name_len;
+    len[1] = entry->e_value_size;
+
+    capbuf = malloc(len[1]);
+    if (!capbuf) {
+        free(capbuf);
+        return ERR_PTR(-ENOMEM);
+    }
+
+    kvbuf = malloc(len[0] + len[1]);
+    if (!kvbuf) {
+        free(kvbuf);
+        return ERR_PTR(-ENOMEM);
+    }
+
+    ret = dev_read(0, capbuf, addr + len[0], len[1]);
+    if (ret) {
+        free(kvbuf);
+        return ERR_PTR(-errno);
+    }
+
+//    caps = (struct vfs_cap_data *)capbuf;
+    memcpy(kvbuf, "capability", len[0]);
+    memcpy(kvbuf + len[0], capbuf, len[1]);
+
+    item = get_xattritem(EROFS_XATTR_INDEX_SECURITY, kvbuf, len);
+    if (IS_ERR(item)){
+        free(kvbuf);
+        return ERR_PTR(-errno);
+    }
+
+    return item;
+}
+
 static int erofs_verify_xattr(struct erofs_inode *inode)
 {
     unsigned int xattr_hdr_size = sizeof(struct erofs_xattr_ibody_header);
@@ -560,9 +689,7 @@ static int erofs_verify_xattr(struct erofs_inode *inode)
     struct erofs_xattr_entry *entry;
     int i, remaining = inode->xattr_isize, ret = 0;
     char buf[EROFS_BLKSIZ];
-    char *kvbuf;
     struct xattr_item *item;
-    unsigned int len[2];
 
     init_list_head(&inode->i_xattrs);
 
@@ -619,7 +746,7 @@ static int erofs_verify_xattr(struct erofs_inode *inode)
         }
 
         entry = (struct erofs_xattr_entry *)buf;
-        //TODO: необходимо сгенерировать  i_xattrs тип struct list_head
+
         char *name = malloc(entry->e_name_len + 1);
 
         ret = dev_read(0, name, addr + xattr_entry_size, entry->e_name_len);
@@ -632,30 +759,37 @@ static int erofs_verify_xattr(struct erofs_inode *inode)
         name[entry->e_name_len] = '\0';
 
         if (strcmp(name, "selinux")==0){
-            len[0] = entry->e_name_len;
-            len[1] = entry->e_value_size;
-            kvbuf = malloc(entry->e_name_len + entry->e_value_size + 1);
-            if (!kvbuf) {
-                goto out;
-            }
+            item = erofs_get_selabel_xattr(entry, addr + xattr_entry_size);
 
-            kvbuf[entry->e_name_len + entry->e_value_size] = '\0';
-
-            ret = dev_read(0, kvbuf, addr + xattr_entry_size, entry->e_name_len + entry->e_value_size);
-            if (ret) {
+            if (IS_ERR(item)) {
                 erofs_err("failed to read xattr entry @ nid %llu: %d",
                           inode->nid | 0ULL, ret);
+                ret = PTR_ERR(item);
                 goto out;
             }
 
-            item = get_xattritem(EROFS_XATTR_INDEX_SECURITY, kvbuf, len);
-            if (IS_ERR(item)){
+            if (item)
+            {
+                ret = erofs_xattr_add(&inode->i_xattrs, item);
+                if(ret)
+                    goto out;
+            }
+        } else if (strcmp(name, "capability")==0)
+        {
+            item = erofs_get_caps_xattr(entry, addr + xattr_entry_size);
+
+            if (IS_ERR(item)) {
+                erofs_err("failed to read xattr entry @ nid %llu: %d",
+                          inode->nid | 0ULL, ret);
+                ret = PTR_ERR(item);
                 goto out;
             }
 
-            ret = erofs_xattr_add(&inode->i_xattrs, item);
-            if(ret){
-                goto out;
+            if (item)
+            {
+                ret = erofs_xattr_add(&inode->i_xattrs, item);
+                if(ret)
+                    goto out;
             }
         }
 
@@ -850,25 +984,48 @@ static inline int erofs_extract_dir(struct erofs_inode *inode)
      * write/execute permission.  These are fixed up later in
      * erofsfsck_set_attributes().
      */
-    create_dir(fsckcfg.extract_path);
+    ret = __create_dir(fsckcfg.extract_path);
+    if (ret)
+        return ret;
 
     return 0;
+}
+
+static uint64_t erofs_get_capabilities(struct list_head *ixattrs){
+    struct inode_xattr_node *node;
+    uint64_t result = 0;
+    char caps_str[16];
+
+    list_for_each_entry(node, ixattrs, list) {
+        const struct xattr_item *item = node->item;
+
+        char *name = malloc(item->len[0] + 1);
+        strncpy(name, item->kvbuf, item->len[0]);
+        name[item->len[0]] = '\0';
+
+        if (strcmp(name, "capability")==0){
+            struct vfs_cap_data *caps;
+            char *caps_buf = malloc(item->len[1]);
+
+            memcpy(caps_buf, item->kvbuf + item->len[0], item->len[1]);
+            caps = (struct vfs_cap_data *)caps_buf;
+            erofs_dbg("magic: %x DATA[0]: %04x DATA[1]: %04x  DATA[2]: %04x DATA[3]: %04x", caps->magic_etc, caps->data[1].permitted, caps->data[1].inheritable, caps->data[0].permitted, caps->data[0].inheritable);
+
+            sprintf(caps_str,"%04x%04x%04x", caps->data[1].permitted, caps->data[1].inheritable, caps->data[0].permitted);
+            result = strtoull(caps_str, NULL, 16);
+        }
+    }
+    return result;
 }
 
 static inline int erofs_extract_file(struct erofs_inode *inode)
 {
     bool tryagain = true;
     int ret, fd;
-    struct inode_xattr_node *node;
     struct list_head *ixattrs = &inode->i_xattrs;
+    uint64_t capabilities;
 
     erofs_dbg("extract file to path: %s", fsckcfg.extract_path);
-
-    list_for_each_entry(node, ixattrs, list) {
-        const struct xattr_item *item = node->item;
-
-        erofs_err("count:%d, name_len:%d value_len: %d value:%s", item->count, item->len[0], item->len[1], item->kvbuf);
-    }
 
     again:
     fd = open(fsckcfg.extract_path,
@@ -911,9 +1068,11 @@ static inline int erofs_extract_file(struct erofs_inode *inode)
         char *truncated_path = (char *)malloc(len * sizeof(char));
         strncpy(truncated_path, fsckcfg.extract_path + fsckcfg.extract_path_base_pos, len);
 
+        capabilities = erofs_get_capabilities(ixattrs);
 
         cJSON *file_item = cJSON_CreateObject();
         cJSON *file_permission = cJSON_CreateObject();
+        cJSON *capabilities_item = cJSON_CreateObject();
         cJSON_AddItemToArray(fs_config_array, file_item);
         cJSON_AddItemToObject(file_item, "target", cJSON_CreateString(truncated_path));
         cJSON_AddItemToObject(file_item, "file", file_permission);
@@ -921,6 +1080,17 @@ static inline int erofs_extract_file(struct erofs_inode *inode)
         cJSON_AddItemToObject(file_permission, "gid", cJSON_CreateNumber(inode->i_gid));
         sprintf(buf, "%#o", inode->i_mode & 0x0FFF);
         cJSON_AddItemToObject(file_permission, "permission", cJSON_CreateString(buf));
+        if (capabilities > 0)
+        {
+            char *caps = NULL;
+            asprintf(&caps, "0x%lx", capabilities);
+            cJSON_AddItemToArray(capabilities_array, capabilities_item);
+            cJSON_AddItemToObject(capabilities_item, "path", cJSON_CreateString(truncated_path));
+            cJSON_AddItemToObject(capabilities_item, "uid", cJSON_CreateNumber(inode->i_uid));
+            cJSON_AddItemToObject(capabilities_item, "gid", cJSON_CreateNumber(inode->i_gid));
+            cJSON_AddItemToObject(file_permission, "mode", cJSON_CreateString(buf));
+            cJSON_AddItemToObject(capabilities_item, "capabilities", cJSON_CreateString(caps));
+        }
 
         free(truncated_path);
     }
@@ -1013,34 +1183,6 @@ static inline int erofs_extract_symlink(struct erofs_inode *inode)
     return ret;
 }
 
-static int erofsfsck_dirent_iter(struct erofs_dir_context *ctx)
-{
-    int ret;
-    size_t prev_pos = fsckcfg.extract_pos;
-
-    if (ctx->dot_dotdot)
-        return 0;
-
-    if (fsckcfg.extract_path) {
-        size_t curr_pos = prev_pos;
-
-        fsckcfg.extract_path[curr_pos++] = '/';
-        strncpy(fsckcfg.extract_path + curr_pos, ctx->dname,
-                ctx->de_namelen);
-        curr_pos += ctx->de_namelen;
-        fsckcfg.extract_path[curr_pos] = '\0';
-        fsckcfg.extract_pos = curr_pos;
-    }
-
-    ret = erofsfsck_check_inode(ctx->dir->nid, ctx->de_nid);
-
-    if (fsckcfg.extract_path) {
-        fsckcfg.extract_path[prev_pos] = '\0';
-        fsckcfg.extract_pos = prev_pos;
-    }
-    return ret;
-}
-
 static int erofsfsck_check_inode(erofs_nid_t pnid, erofs_nid_t nid)
 {
     int ret;
@@ -1106,53 +1248,6 @@ static int erofsfsck_check_inode(erofs_nid_t pnid, erofs_nid_t nid)
     return ret;
 }
 
-static int write_to_config_file(char *file_path, char *data)
-{
-    FILE *fp;
-
-    if((fp = fopen(file_path, "w")) == NULL)
-    {
-        erofs_err("Error occured while opening file: %s", file_path);
-        return -EINVAL;
-    }
-
-    fprintf(fp, "%s\n", data);
-
-    fclose(fp);
-    return 0;
-}
-
-static int save_config()
-{
-    erofs_info("Save fs_config to: %s", fsckcfg.fs_config_file);
-    if (write_to_config_file(fsckcfg.fs_config_file, cJSON_Print(fs_config)) < 0) return -EINVAL;
-
-    erofs_info("Save symlinks to: %s", fsckcfg.symlink_file);
-    if (write_to_config_file(fsckcfg.symlink_file, cJSON_Print(symlinks)) < 0) return -EINVAL;
-
-    return 0;
-}
-
-static int init_json()
-{
-    fs_config = cJSON_CreateObject();
-    if (fs_config == NULL) return -errno;
-
-    symlinks = cJSON_CreateObject();
-    if (symlinks == NULL) return -errno;
-
-    fs_config_array = cJSON_CreateArray();
-    if (fs_config_array == NULL) return -errno;
-
-    symlinks_array = cJSON_CreateArray();
-    if (symlinks_array == NULL) return -errno;
-
-    cJSON_AddItemToObject(fs_config, "FSConfig", fs_config_array);
-    cJSON_AddItemToObject(symlinks, "Symlinks", symlinks_array);
-
-    return 0;
-}
-
 int main(int argc, char **argv)
 {
     int err;
@@ -1161,8 +1256,8 @@ int main(int argc, char **argv)
 
     erofs_init_configure();
 
-    err = init_json();
-    if(init_json() < 0)
+    err = __init_json();
+    if(err < 0)
     {
         erofs_err("JSON initialization error");
         goto exit;
@@ -1184,13 +1279,12 @@ int main(int argc, char **argv)
     fsckcfg.save_fs_config = false;
     fsckcfg.config_dir = NULL;
     fsckcfg.extract_path_base_pos = 0;
-    fsckcfg.symlink_file = NULL;
-    fsckcfg.fs_config_file = NULL;
+    fsckcfg.config_file = NULL;
 
     err = erofsfsck_parse_options_cfg(argc, argv);
     if (err) {
         if (err == -EINVAL)
-            usage();
+            __usage();
         goto exit;
     }
 
@@ -1235,7 +1329,7 @@ int main(int argc, char **argv)
 
     if (fsckcfg.save_fs_config)
     {
-        save_config();
+        __save_config();
     }
     exit_dev_close:
     dev_close();
