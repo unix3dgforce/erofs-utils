@@ -34,10 +34,10 @@
 static DECLARE_HASHTABLE(ea_hashtable, EA_HASHTABLE_BITS);
 static LIST_HEAD(shared_xattrs_list);
 
-cJSON *fs_config = NULL;
-cJSON *symlinks = NULL ;
+cJSON *root = NULL;
 cJSON *fs_config_array = NULL;
 cJSON *symlinks_array = NULL;
+cJSON *capabilities_array = NULL;
 
 static unsigned int shared_xattrs_count, shared_xattrs_size;
 
@@ -72,8 +72,7 @@ struct erofsfsck_cfg {
     bool preserve_perms;
     bool save_fs_config;
     char *config_dir;
-    char *symlink_file;
-    char *fs_config_file;
+    char *config_file;
     size_t extract_path_base_pos;
 };
 
@@ -171,22 +170,16 @@ static inline int __write_to_config_file(char *file_path, char *data)
 
 static inline int __save_config()
 {
-    erofs_info("Save fs_config to: %s", fsckcfg.fs_config_file);
-    if (__write_to_config_file(fsckcfg.fs_config_file, cJSON_Print(fs_config)) < 0) return -EIO;
-
-    erofs_info("Save symlinks to: %s", fsckcfg.symlink_file);
-    if (__write_to_config_file(fsckcfg.symlink_file, cJSON_Print(symlinks)) < 0) return -EIO;
+    erofs_info("Save config to: %s", fsckcfg.config_file);
+    if (__write_to_config_file(fsckcfg.config_file, cJSON_Print(root)) < 0) return -EIO;
 
     return 0;
 }
 
 static inline int __init_json()
 {
-    fs_config = cJSON_CreateObject();
-    if (fs_config == NULL) return -errno;
-
-    symlinks = cJSON_CreateObject();
-    if (symlinks == NULL) return -errno;
+    root = cJSON_CreateObject();
+    if (root == NULL) return -errno;
 
     fs_config_array = cJSON_CreateArray();
     if (fs_config_array == NULL) return -errno;
@@ -194,8 +187,12 @@ static inline int __init_json()
     symlinks_array = cJSON_CreateArray();
     if (symlinks_array == NULL) return -errno;
 
-    cJSON_AddItemToObject(fs_config, "FSConfig", fs_config_array);
-    cJSON_AddItemToObject(symlinks, "Symlinks", symlinks_array);
+    capabilities_array = cJSON_CreateArray();
+    if (capabilities_array == NULL) return -errno;
+
+    cJSON_AddItemToObject(root, "Capabilities", capabilities_array);
+    cJSON_AddItemToObject(root, "FSConfig", fs_config_array);
+    cJSON_AddItemToObject(root, "Symlinks", symlinks_array);
 
     return 0;
 }
@@ -480,18 +477,14 @@ static int erofsfsck_parse_options_cfg(int argc, char **argv)
         //TODO Подвергнуть рефакторингу
         char *filename;
 
-        fsckcfg.symlink_file = malloc(PATH_MAX);
-        fsckcfg.fs_config_file = malloc(PATH_MAX);
+        fsckcfg.config_file = malloc(PATH_MAX);
 
         filename = __remove_extensions(basename(strdup(cfg.c_img_path)), '.', '/');
 
-        if (!fsckcfg.symlink_file && !fsckcfg.fs_config_file)
+        if (!fsckcfg.config_file)
             return -ENOMEM;
 
-        if (asprintf(&fsckcfg.symlink_file, "%s/%s_symlinks.json", fsckcfg.config_dir, filename) < 0)
-            return -ENOMEM;
-
-        if (asprintf(&fsckcfg.fs_config_file, "%s/%s_fs_config.json", fsckcfg.config_dir, filename) < 0)
+        if (asprintf(&fsckcfg.config_file, "%s/%s_config.json", fsckcfg.config_dir, filename) < 0)
             return -ENOMEM;
 
         free(filename);
@@ -1085,7 +1078,7 @@ static inline int erofs_extract_file(struct erofs_inode *inode)
         cJSON_AddItemToObject(file_permission, "uid", cJSON_CreateNumber(inode->i_uid));
         cJSON_AddItemToObject(file_permission, "gid", cJSON_CreateNumber(inode->i_gid));
         sprintf(buf, "%#o", inode->i_mode & 0x0FFF);
-        cJSON_AddItemToObject(file_permission, "mode", cJSON_CreateString(buf));
+        cJSON_AddItemToObject(file_permission, "permission", cJSON_CreateString(buf));
         if (capabilities > 0)
         {
             char *caps = NULL;
@@ -1280,8 +1273,7 @@ int main(int argc, char **argv)
     fsckcfg.save_fs_config = false;
     fsckcfg.config_dir = NULL;
     fsckcfg.extract_path_base_pos = 0;
-    fsckcfg.symlink_file = NULL;
-    fsckcfg.fs_config_file = NULL;
+    fsckcfg.config_file = NULL;
 
     err = erofsfsck_parse_options_cfg(argc, argv);
     if (err) {
