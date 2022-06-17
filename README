@@ -1,22 +1,46 @@
+!!! WARNING !!! NOT the official erofs-utils repo, just for my personal use.
+
+dependencies & build
+--------------------
+ lz4 1.8.0+ for lz4 enabled [2], lz4 1.9.3+ highly recommended [4][5].
+ xz utils 5.3.2alpha [6] or later versions for microlzma enabled.
+
+ libselinux 3.1+
+
+how to build
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+to build, you can run the following commands in order:
+
+::
+	$ ./autogen.sh
+	$ ./configure --enable-lzma --with-selinux --with-liblzma-incdir=DIR --with-liblzma-libdir=DIR
+	$ make
+
+
 erofs-utils
 ===========
 
-erofs-utils includes user-space tools for EROFS filesystem.
-Currently mkfs.erofs, (experimental) erofsfuse, dump.erofs, fsck.erofs
-are available.
+userspace tools for EROFS filesystem, currently including:
 
-Dependencies & build
+  mkfs.erofs    filesystem formatter
+  erofsfuse     FUSE daemon alternative
+  dump.erofs    filesystem analyzer
+  fsck.erofs    filesystem compatibility & consistency checker as well
+                as extractor
+
+dependencies & build
 --------------------
 
  lz4 1.8.0+ for lz4 enabled [2], lz4 1.9.3+ highly recommended [4][5].
- XZ Utils 5.3.2alpha [6] or later versions for MicroLZMA enabled.
+ xz utils 5.3.2alpha [6] or later versions for microlzma enabled.
 
  libfuse 2.6+ for erofsfuse enabled as a plus.
 
-How to build with lz4-1.9.0 or above
+how to build with lz4-1.9.0 or above
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-To build, you can run the following commands in order:
+to build, you can run the following commands in order:
 
 ::
 
@@ -26,135 +50,135 @@ To build, you can run the following commands in order:
 
 mkfs.erofs binary will be generated under mkfs folder.
 
-* For lz4 < 1.9.2, there are some stability issues about
-  LZ4_compress_destSize(). (lz4hc isn't impacted) [3].
+* for lz4 < 1.9.2, there are some stability issues about
+  lz4_compress_destsize(). (lz4hc isn't impacted) [3].
 
-** For lz4 = 1.9.2, there is a noticeable regression about
-   LZ4_decompress_safe_partial() [5], which impacts erofsfuse
-   functionality for legacy images (without 0PADDING).
+** for lz4 = 1.9.2, there is a noticeable regression about
+   lz4_decompress_safe_partial() [5], which impacts erofsfuse
+   functionality for legacy images (without 0padding).
 
-How to build with lz4-1.8.0~1.8.3
+how to build with lz4-1.8.0~1.8.3
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-For these old lz4 versions, lz4hc algorithm cannot be supported
-without lz4-static installed due to LZ4_compress_HC_destSize()
+for these old lz4 versions, lz4hc algorithm cannot be supported
+without lz4-static installed due to lz4_compress_hc_destsize()
 unstable api usage, which means lz4 will only be available if
 lz4-static isn't found.
 
-On Fedora, lz4-static can be installed by using:
+on fedora, lz4-static can be installed by using:
 
 	yum install lz4-static.x86_64
 
-However, it's still not recommended using those versions directly
+however, it's still not recommended using those versions directly
 since there are serious bugs in these compressors, see [2] [3] [4]
 as well.
 
-How to build with liblzma
+how to build with liblzma
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
-In order to enable LZMA support, build with the following commands:
+in order to enable lzma support, build with the following commands:
 	$ ./configure --enable-lzma
 	$ make
 
-Additionally, you could specify liblzma build paths with:
+additionally, you could specify liblzma build paths with:
 	--with-liblzma-incdir and --with-liblzma-libdir
 
 mkfs.erofs
 ----------
 
-two main kinds of EROFS images can be generated: (un)compressed.
+two main kinds of erofs images can be generated: (un)compressed.
 
- - For uncompressed images, there will be none of compression
-   files in these images. However, it can decide whether the tail
+ - for uncompressed images, there will be none of compression
+   files in these images. however, it can decide whether the tail
    block of a file should be inlined or not properly [1].
 
- - For compressed images, it'll try to use specific algorithms
+ - for compressed images, it'll try to use specific algorithms
    first for each regular file and see if storage space can be
-   saved with compression. If not, fallback to an uncompressed
+   saved with compression. if not, fallback to an uncompressed
    file.
 
-How to generate EROFS images (lz4 for Linux 5.3+, lzma for Linux 5.16+)
+how to generate erofs images (lz4 for linux 5.3+, lzma for linux 5.16+)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Currently lz4(hc) and lzma are available for compression, e.g.
+currently lz4(hc) and lzma are available for compression, e.g.
  $ mkfs.erofs -zlz4hc foo.erofs.img foo/
 
-Or leave all files uncompressed as an option:
+or leave all files uncompressed as an option:
  $ mkfs.erofs foo.erofs.img foo/
 
-In addition, you could specify a higher compression level to get a
+in addition, you could specify a higher compression level to get a
 (slightly) better compression ratio than the default level, e.g.
  $ mkfs.erofs -zlz4hc,12 foo.erofs.img foo/
 
-Note that all compressors are still single-threaded for now, thus it
-could take more time on the multiprocessor platform. Multi-threaded
-approach is already in our TODO list.
+note that all compressors are still single-threaded for now, thus it
+could take more time on the multiprocessor platform. multi-threaded
+approach is already in our todo list.
 
-How to generate EROFS big pcluster images (Linux 5.13+)
+how to generate erofs big pcluster images (linux 5.13+)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-In order to get much better compression ratios (thus better sequential
+in order to get much better compression ratios (thus better sequential
 read performance for common storage devices), big pluster feature has
 been introduced since linux-5.13, which is not forward-compatible with
 old kernels.
 
-In details, -C is used to specify the maximum size of each big pcluster
+in details, -c is used to specify the maximum size of each big pcluster
 in bytes, e.g.
- $ mkfs.erofs -zlz4hc -C65536 foo.erofs.img foo/
+ $ mkfs.erofs -zlz4hc -c65536 foo.erofs.img foo/
 
-So in that case, pcluster size can be 64KiB at most.
+so in that case, pcluster size can be 64kib at most.
 
-Note that large pcluster size can cause bad random performance, so
-please evaluate carefully in advance. Or make your own per-(sub)file
+note that large pcluster size can cause bad random performance, so
+please evaluate carefully in advance. or make your own per-(sub)file
 compression strategies according to file access patterns if needed.
 
-How to generate legacy EROFS images (Linux 4.19+)
+how to generate legacy erofs images (linux 4.19+)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Decompression inplace and compacted indexes have been introduced in
-Linux upstream v5.3, which are not forward-compatible with older
+decompression inplace and compacted indexes have been introduced in
+linux upstream v5.3, which are not forward-compatible with older
 kernels.
 
-In order to generate _legacy_ EROFS images for old kernels,
-consider adding "-E legacy-compress" to the command line, e.g.
+in order to generate _legacy_ erofs images for old kernels,
+consider adding "-e legacy-compress" to the command line, e.g.
 
- $ mkfs.erofs -E legacy-compress -zlz4hc foo.erofs.img foo/
+ $ mkfs.erofs -e legacy-compress -zlz4hc foo.erofs.img foo/
 
-For Linux kernel >= 5.3, legacy EROFS images are _NOT recommended_
+for linux kernel >= 5.3, legacy erofs images are _not recommended_
 due to runtime performance loss compared with non-legacy images.
 
-Obsoleted erofs.mkfs
+obsoleted erofs.mkfs
 ~~~~~~~~~~~~~~~~~~~~
 
-There is an original erofs.mkfs version developed by Li Guifu,
+there is an original erofs.mkfs version developed by li guifu,
 which was replaced by the new erofs-utils implementation.
 
 git://git.kernel.org/pub/scm/linux/kernel/git/xiang/erofs-utils.git -b obsoleted_mkfs
 
-PLEASE NOTE: This version is highly _NOT recommended_ now.
+please note: this version is highly _not recommended_ now.
 
 erofsfuse (experimental)
 ------------------------
 
-erofsfuse is introduced to support EROFS format for various platforms
+erofsfuse is introduced to support erofs format for various platforms
 (including older linux kernels) and new on-disk features iteration.
-It can also be used as an unpacking tool for unprivileged users.
+it can also be used as an unpacking tool for unprivileged users.
 
-It supports fixed-sized output decompression *without* any in-place
-I/O or in-place decompression optimization. Also like the other FUSE
+it supports fixed-sized output decompression *without* any in-place
+i/o or in-place decompression optimization. also like the other fuse
 implementations, it suffers from most common performance issues (e.g.
-significant I/O overhead, double caching, etc.)
+significant i/o overhead, double caching, etc.)
 
-Therefore, NEVER use it if performance is the top concern.
+therefore, never use it if performance is the top concern.
 
-Note that xattr & ACL aren't implemented yet due to the current Android
-use-case vs limited time. If you have some interest, contribution is,
+note that xattr & acl aren't implemented yet due to the current android
+use-case vs limited time. if you have some interest, contribution is,
 as always, welcome.
 
-How to build erofsfuse
+how to build erofsfuse
 ~~~~~~~~~~~~~~~~~~~~~~
 
-It's disabled by default as an experimental feature for now due to
+it's disabled by default as an experimental feature for now due to
 the extra libfuse dependency, to enable and build it manually:
 
 	$ ./configure --enable-fuse
@@ -162,71 +186,71 @@ the extra libfuse dependency, to enable and build it manually:
 
 erofsfuse binary will be generated under fuse folder.
 
-How to mount an EROFS image with erofsfuse
+how to mount an erofs image with erofsfuse
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-As the other FUSE implementations, it's quite simple to mount with
+as the other fuse implementations, it's quite simple to mount with
 erofsfuse, e.g.:
  $ erofsfuse foo.erofs.img foo/
 
-Alternatively, to make it run in foreground (with debugging level 3):
+alternatively, to make it run in foreground (with debugging level 3):
  $ erofsfuse -f --dbglevel=3 foo.erofs.img foo/
 
-To debug erofsfuse (also automatically run in foreground):
+to debug erofsfuse (also automatically run in foreground):
  $ erofsfuse -d foo.erofs.img foo/
 
-To unmount an erofsfuse mountpoint as a non-root user:
+to unmount an erofsfuse mountpoint as a non-root user:
  $ fusermount -u foo/
 
 dump.erofs and fsck.erofs (experimental)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 dump.erofs and fsck.erofs are two new experimental tools to analyse
-and check EROFS file systems.
+and check erofs file systems.
 
-They are still incomplete and actively under development by the
-community. But you could check them out if needed in advance.
+they are still incomplete and actively under development by the
+community. but you could check them out if needed in advance.
 
-Report, feedback and/or contribution are welcomed.
+report, feedback and/or contribution are welcomed.
 
-Contribution
+contribution
 ------------
 
-erofs-utils is under GPLv2+ as a part of EROFS filesystem project,
+erofs-utils is under gplv2+ as a part of erofs filesystem project,
 feel free to send patches or feedback to:
   linux-erofs mailing list   <linux-erofs@lists.ozlabs.org>
 
-Comments
+comments
 --------
 
-[1] According to the EROFS on-disk format, the tail block of files
+[1] according to the erofs on-disk format, the tail block of files
     could be inlined aggressively with its metadata in order to reduce
-    the I/O overhead and save the storage space (called tail-packing).
+    the i/o overhead and save the storage space (called tail-packing).
 
-[2] There was a bug until lz4-1.8.3, which can crash erofs-utils
-    randomly. Fortunately bugfix by our colleague Qiuyang Sun was
+[2] there was a bug until lz4-1.8.3, which can crash erofs-utils
+    randomly. fortunately bugfix by our colleague qiuyang sun was
     merged in lz4-1.9.0.
 
-    For more details, please refer to
+    for more details, please refer to
     https://github.com/lz4/lz4/commit/660d21272e4c8a0f49db5fc1e6853f08713dff82
 
-[3] There were many bugfixes merged into lz4-1.9.2 for
-    LZ4_compress_destSize(), and I once ran into some crashs due to
-    those issues. * Again lz4hc is not affected. *
+[3] there were many bugfixes merged into lz4-1.9.2 for
+    lz4_compress_destsize(), and i once ran into some crashs due to
+    those issues. * again lz4hc is not affected. *
 
-    [LZ4_compress_destSize] Allow 2 more bytes of match length
+    [lz4_compress_destsize] allow 2 more bytes of match length
     https://github.com/lz4/lz4/commit/690009e2c2f9e5dcb0d40e7c0c40610ce6006eda
 
-    [LZ4_compress_destSize] Fix rare data corruption bug
+    [lz4_compress_destsize] fix rare data corruption bug
     https://github.com/lz4/lz4/commit/6bc6f836a18d1f8fd05c8fc2b42f1d800bc25de1
 
-    [LZ4_compress_destSize] Fix overflow condition
+    [lz4_compress_destsize] fix overflow condition
     https://github.com/lz4/lz4/commit/13a2d9e34ffc4170720ce417c73e396d0ac1471a
 
-    [LZ4_compress_destSize] Fix off-by-one error in fix
+    [lz4_compress_destsize] fix off-by-one error in fix
     https://github.com/lz4/lz4/commit/7c32101c655d93b61fc212dcd512b87119dd7333
 
-    [LZ4_compress_destSize] Fix off-by-one error
+    [lz4_compress_destsize] fix off-by-one error
     https://github.com/lz4/lz4/commit/d7cad81093cd805110291f84d64d385557d0ffba
 
     since upstream lz4 doesn't have stable branch for old versions, it's
@@ -235,8 +259,8 @@ Comments
     version as well) or backport all stable bugfixes to old stable versions,
     e.g. our unofficial lz4 fork: https://github.com/erofs/lz4
 
-[4] LZ4HC didn't compress long zeroed buffer properly with
-    LZ4_compress_HC_destSize()
+[4] lz4hc didn't compress long zeroed buffer properly with
+    lz4_compress_hc_destsize()
     https://github.com/lz4/lz4/issues/784
 
     which has been resolved in
@@ -245,7 +269,7 @@ Comments
     and already included in lz4-1.9.3, see:
     https://github.com/lz4/lz4/releases/tag/v1.9.3
 
-[5] LZ4_decompress_safe_partial is broken in 1.9.2
+[5] lz4_decompress_safe_partial is broken in 1.9.2
     https://github.com/lz4/lz4/issues/783
 
     which is also resolved in lz4-1.9.3.
