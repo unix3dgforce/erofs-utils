@@ -7,6 +7,11 @@ dependencies & build
 
  libselinux 3.1+
 
+:: xz
+    $ ./configure --prefix=/opt/xz --enable-threads=posix CFLAGS=-static LDFLAGS=-static
+	$ make
+	$ make install
+
 how to build
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -14,7 +19,7 @@ to build, you can run the following commands in order:
 
 ::
 	$ ./autogen.sh
-	$ ./configure --enable-lzma --with-selinux --with-liblzma-incdir=DIR --with-liblzma-libdir=DIR
+	$ ./configure --enable-lzma --with-selinux --with-liblzma-incdir=/opt/xz/include --with-liblzma-libdir=/opt/xz/lib CFLAGS=-static LDFLAGS=-static
 	$ make
 
 

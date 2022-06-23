@@ -1,0 +1,11 @@
+include(libbase.cmake)
+include(libext2_uuid.cmake)
+include(liblog.cmake)
+include(libcutils.cmake)
+include(libselinux.cmake)
+include(liberofs.cmake)
+include(libpcre2.cmake)
+
+if (CMAKE_SYSTEM_NAME MATCHES "Android")
+    include(libpackagelistparser.cmake)
+endif()
