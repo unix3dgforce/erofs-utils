@@ -22,6 +22,7 @@ set(EROFS_UTILS_DEFAULTS_CFLAGS
 )
 
 set(LIBEROFS_SRCS
+    "${TARGET_SRC_DIR}/cJSON.c"
     "${TARGET_SRC_DIR}/config.c"
     "${TARGET_SRC_DIR}/io.c"
     "${TARGET_SRC_DIR}/cache.c"
