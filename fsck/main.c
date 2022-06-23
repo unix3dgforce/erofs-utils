@@ -219,7 +219,7 @@ static void __usage(void)
           " -p                     print total compression ratio of all files\n"
           " --device=X             specify an extra device to be used together\n"
           " --extract[=X]          check if all files are well encoded, optionally extract to X\n"
-          " --save-config=X        save fs_config & symlink file to directory X\n"
+          " --save-config=X        save file system config to JSON file in X\n"
           " --help                 display this help and exit\n"
           "\nExtraction options (--extract=X is required):\n"
           " --force                allow extracting to root\n"
@@ -395,7 +395,7 @@ static int erofsfsck_parse_options_cfg(int argc, char **argv)
                     while (len > 1 && optarg[len - 1] == '/')
                         len--;
 
-                    if (asprintf(&fsckcfg.config_dir, "%s/config", optarg) < 0)
+                    if (asprintf(&fsckcfg.config_dir, "%s", optarg) < 0)
                         return -ENOMEM;
 
                     ret = __create_dir(fsckcfg.config_dir);
@@ -474,7 +474,6 @@ static int erofsfsck_parse_options_cfg(int argc, char **argv)
         return -ENOMEM;
 
     if (fsckcfg.save_fs_config) {
-        //TODO Подвергнуть рефакторингу
         char *filename;
 
         fsckcfg.config_file = malloc(PATH_MAX);
@@ -954,7 +953,7 @@ static inline int erofs_extract_dir(struct erofs_inode *inode)
         return ret;
 
     if (fsckcfg.save_fs_config){
-        char *buf = (char *)malloc(6 * sizeof(char));
+        char *buf = NULL;
 
         size_t len = strlen(fsckcfg.extract_path) - fsckcfg.extract_path_base_pos + 1;
         char *truncated_path = (char *)malloc(len * sizeof(char));
@@ -972,7 +971,7 @@ static inline int erofs_extract_dir(struct erofs_inode *inode)
         cJSON_AddItemToObject(dir_item, "directory", dir_permission);
         cJSON_AddItemToObject(dir_permission, "uid", cJSON_CreateNumber(inode->i_uid));
         cJSON_AddItemToObject(dir_permission, "gid", cJSON_CreateNumber(inode->i_gid));
-        sprintf(buf, "%#o", inode->i_mode & 0x0FFF);
+        asprintf(&buf, "%#o", inode->i_mode & 0x0FFF);
         cJSON_AddItemToObject(dir_permission, "permission", cJSON_CreateString(buf));
 
         free(truncated_path);
@@ -1062,7 +1061,7 @@ static inline int erofs_extract_file(struct erofs_inode *inode)
 
     if (fsckcfg.save_fs_config){
 
-        char *buf = (char *)malloc(6 * sizeof(char));
+        char *buf = NULL;
 
         size_t len = strlen(fsckcfg.extract_path) - fsckcfg.extract_path_base_pos + 1;
         char *truncated_path = (char *)malloc(len * sizeof(char));
@@ -1078,8 +1077,9 @@ static inline int erofs_extract_file(struct erofs_inode *inode)
         cJSON_AddItemToObject(file_item, "file", file_permission);
         cJSON_AddItemToObject(file_permission, "uid", cJSON_CreateNumber(inode->i_uid));
         cJSON_AddItemToObject(file_permission, "gid", cJSON_CreateNumber(inode->i_gid));
-        sprintf(buf, "%#o", inode->i_mode & 0x0FFF);
+        asprintf(&buf, "%#o", inode->i_mode & 0x0FFF);
         cJSON_AddItemToObject(file_permission, "permission", cJSON_CreateString(buf));
+
         if (capabilities > 0)
         {
             char *caps = NULL;
