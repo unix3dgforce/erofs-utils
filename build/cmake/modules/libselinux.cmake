@@ -37,7 +37,7 @@ if (CMAKE_SYSTEM_NAME MATCHES "Linux")
     #linux_glibc
     list(APPEND LIBSELINUX_SRCS
         ${LIBSELINUX_DEFAULTS_SRCS}
-        "${TARGET_SRC_DIR}/android/android_host.c"
+#        "${TARGET_SRC_DIR}/android/android_host.c"
         "${TARGET_SRC_DIR}/avc.c"
         "${TARGET_SRC_DIR}/avc_internal.c"
         "${TARGET_SRC_DIR}/avc_sidtab.c"
