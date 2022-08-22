@@ -967,7 +967,7 @@ static inline int erofs_extract_dir(struct erofs_inode *inode)
         cJSON *dir_item = cJSON_CreateObject();
         cJSON *dir_permission = cJSON_CreateObject();
         cJSON_AddItemToArray(fs_config_array, dir_item);
-        cJSON_AddItemToObject(dir_item, "target", cJSON_CreateString(truncated_path));
+        cJSON_AddItemToObject(dir_item, "path", cJSON_CreateString(truncated_path));
         cJSON_AddItemToObject(dir_item, "directory", dir_permission);
         cJSON_AddItemToObject(dir_permission, "uid", cJSON_CreateNumber(inode->i_uid));
         cJSON_AddItemToObject(dir_permission, "gid", cJSON_CreateNumber(inode->i_gid));
@@ -1073,7 +1073,7 @@ static inline int erofs_extract_file(struct erofs_inode *inode)
         cJSON *file_permission = cJSON_CreateObject();
         cJSON *capabilities_item = cJSON_CreateObject();
         cJSON_AddItemToArray(fs_config_array, file_item);
-        cJSON_AddItemToObject(file_item, "target", cJSON_CreateString(truncated_path));
+        cJSON_AddItemToObject(file_item, "path", cJSON_CreateString(truncated_path));
         cJSON_AddItemToObject(file_item, "file", file_permission);
         cJSON_AddItemToObject(file_permission, "uid", cJSON_CreateNumber(inode->i_uid));
         cJSON_AddItemToObject(file_permission, "gid", cJSON_CreateNumber(inode->i_gid));
